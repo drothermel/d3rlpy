@@ -486,6 +486,7 @@ class LearnableBase:
 
         """
 
+        """
         transitions = []
         if isinstance(dataset, MDPDataset):
             for episode in dataset.episodes:
@@ -541,6 +542,10 @@ class LearnableBase:
             LOG.debug("RoundIterator is selected.")
         else:
             raise ValueError("Either of n_epochs or n_steps must be given.")
+        """
+
+        iterator = dataset
+        assert self.get_action_type() == ActionSpace.DISCRETE
 
         # setup logger
         logger = self._prepare_logger(
@@ -579,11 +584,14 @@ class LearnableBase:
         # instantiate implementation
         if self._impl is None:
             LOG.debug("Building models...")
-            transition = iterator.transitions[0]
-            action_size = transition.get_action_size()
-            observation_shape = tuple(transition.get_observation_shape())
+            #transition = iterator.transitions[0]
+            #action_size = transition.get_action_size()
+            action_size = 121
+            observation_shape = (4, 84, 84)
+            #observation_shape = tuple(transition.get_observation_shape())
             self.create_impl(
-                self._process_observation_shape(observation_shape), action_size
+                #self._process_observation_shape(observation_shape), action_size
+                observation_shape, action_size
             )
             LOG.debug("Models have been built.")
         else:
@@ -605,36 +613,37 @@ class LearnableBase:
             # dict to add incremental mean losses to epoch
             epoch_loss = defaultdict(list)
 
-            range_gen = tqdm(
-                range(len(iterator)),
-                disable=not show_progress,
-                desc=f"Epoch {int(epoch)}/{n_epochs}",
-            )
+            #range_gen = tqdm(
+            #    range(len(iterator)),
+            #    disable=not show_progress,
+            #    desc=f"Epoch {int(epoch)}/{n_epochs}",
+            #)
+            #iterator.reset()
+            #for itr in range_gen:
 
-            iterator.reset()
-
-            for itr in range_gen:
+            for batch in iterator:
 
                 # generate new transitions with dynamics models
-                new_transitions = self.generate_new_data(
-                    transitions=iterator.transitions,
-                )
-                if new_transitions:
-                    iterator.add_generated_transitions(new_transitions)
-                    LOG.debug(
-                        f"{len(new_transitions)} transitions are generated.",
-                        real_transitions=len(iterator.transitions),
-                        fake_transitions=len(iterator.generated_transitions),
-                    )
+                #new_transitions = self.generate_new_data(
+                #    transitions=iterator.transitions,
+                #)
+                #if new_transitions:
+                #    iterator.add_generated_transitions(new_transitions)
+                #    LOG.debug(
+                #        f"{len(new_transitions)} transitions are generated.",
+                #        real_transitions=len(iterator.transitions),
+                #        fake_transitions=len(iterator.generated_transitions),
+                #    )
 
                 with logger.measure_time("step"):
                     # pick transitions
-                    with logger.measure_time("sample_batch"):
-                        batch = next(iterator)
+                    #with logger.measure_time("sample_batch"):
+                    #    batch = next(iterator)
 
                     # update parameters
                     with logger.measure_time("algorithm_update"):
                         loss = self.update(batch)
+                        raise Exception("STOP")
 
                     # record metrics
                     for name, val in loss.items():
@@ -831,6 +840,8 @@ class LearnableBase:
         # save shapes
         params["observation_shape"] = self._impl.observation_shape
         params["action_size"] = self._impl.action_size
+        # The encoder factory could be a class that is not serializable
+        del params["encoder_factory"]
 
         # serialize objects
         params = _serialize_params(params)

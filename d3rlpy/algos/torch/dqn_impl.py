@@ -94,8 +94,8 @@ class DQNImpl(DiscreteQFunctionMixin, TorchImplBase):
             self._q_func.parameters(), lr=self._learning_rate
         )
 
-    @train_api
-    @torch_api(scaler_targets=["obs_t", "obs_tpn"])
+    #@train_api
+    #@torch_api(scaler_targets=["obs_t", "obs_tpn"])
     def update(self, batch: TorchMiniBatch) -> np.ndarray:
         assert self._optim is not None
 
