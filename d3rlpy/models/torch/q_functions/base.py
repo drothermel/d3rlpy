@@ -1,5 +1,5 @@
 from abc import ABCMeta, abstractmethod
-from typing import Optional
+from typing import Optional, Union, Dict
 
 import torch
 
@@ -10,7 +10,7 @@ class QFunction(metaclass=ABCMeta):
     @abstractmethod
     def compute_error(
         self,
-        observations: torch.Tensor,
+        observations: Union[torch.Tensor, Dict[str, torch.Tensor]],
         actions: torch.Tensor,
         rewards: torch.Tensor,
         target: torch.Tensor,
@@ -27,16 +27,16 @@ class QFunction(metaclass=ABCMeta):
 
 class DiscreteQFunction(QFunction):
     @abstractmethod
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: Union[torch.Tensor, Dict[str, torch.Tensor]]) -> torch.Tensor:
         pass
 
     @abstractmethod
     def compute_target(
-        self, x: torch.Tensor, action: Optional[torch.Tensor]
+        self, x: Union[torch.Tensor, Dict[str, torch.Tensor]], action: Optional[torch.Tensor]
     ) -> torch.Tensor:
         pass
 
-    def __call__(self, x: torch.Tensor) -> torch.Tensor:
+    def __call__(self, x: Union[torch.Tensor, Dict[str, torch.Tensor]]) -> torch.Tensor:
         return self.forward(x)
 
     @property
@@ -46,16 +46,16 @@ class DiscreteQFunction(QFunction):
 
 class ContinuousQFunction(QFunction):
     @abstractmethod
-    def forward(self, x: torch.Tensor, action: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: Union[torch.Tensor, Dict[str, torch.Tensor]], action: torch.Tensor) -> torch.Tensor:
         pass
 
     @abstractmethod
     def compute_target(
-        self, x: torch.Tensor, action: torch.Tensor
+        self, x: Union[torch.Tensor, Dict[str, torch.Tensor]], action: torch.Tensor
     ) -> torch.Tensor:
         pass
 
-    def __call__(self, x: torch.Tensor, action: torch.Tensor) -> torch.Tensor:
+    def __call__(self, x: Union[torch.Tensor, Dict[str, torch.Tensor]], action: torch.Tensor) -> torch.Tensor:
         return self.forward(x, action)
 
     @property

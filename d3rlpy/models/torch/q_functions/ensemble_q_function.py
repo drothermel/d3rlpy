@@ -1,4 +1,4 @@
-from typing import List, Optional, Union, cast
+from typing import List, Optional, Union, cast, Dict
 
 import torch
 from torch import nn
@@ -80,7 +80,7 @@ class EnsembleQFunction(nn.Module):  # type: ignore
 
     def compute_error(
         self,
-        observations: torch.Tensor,
+        observations: Union[torch.Tensor, Dict[str, torch.Tensor]],
         actions: torch.Tensor,
         rewards: torch.Tensor,
         target: torch.Tensor,
@@ -88,9 +88,13 @@ class EnsembleQFunction(nn.Module):  # type: ignore
         gamma: float = 0.99,
     ) -> torch.Tensor:
         assert target.ndim == 2
+        device = (
+            observations.device if isinstance(observations, torch.Tensor) else
+            next(iter(observations.values())).device
+        )
 
         td_sum = torch.tensor(
-            0.0, dtype=torch.float32, device=observations.device
+            0.0, dtype=torch.float32, device=device
         )
         for q_func in self._q_funcs:
             loss = q_func.compute_error(
@@ -107,25 +111,29 @@ class EnsembleQFunction(nn.Module):  # type: ignore
 
     def _compute_target(
         self,
-        x: torch.Tensor,
+        x: Union[torch.Tensor, Dict[str, torch.Tensor]],
         action: Optional[torch.Tensor] = None,
         reduction: str = "min",
         lam: float = 0.75,
     ) -> torch.Tensor:
+        # TODO: we still want to handle T, B, ....
+        B = x.size(0) if isinstance(x, torch.Tensor) else next(iter(x.values())).size(0)
+
         values_list: List[torch.Tensor] = []
         for q_func in self._q_funcs:
             target = q_func.compute_target(x, action)
-            values_list.append(target.reshape(1, x.shape[0], -1))
+            values_list.append(target.reshape(1, B, -1))
 
         values = torch.cat(values_list, dim=0)
 
+        # TODO: I suspect this will break with T, B, ....
         if action is None:
             # mean Q function
             if values.shape[2] == self._action_size:
                 return _reduce_ensemble(values, reduction)
             # distributional Q function
             n_q_funcs = values.shape[0]
-            values = values.view(n_q_funcs, x.shape[0], self._action_size, -1)
+            values = values.view(n_q_funcs, B, self._action_size, -1)
             return _reduce_quantile_ensemble(values, reduction)
 
         if values.shape[2] == 1:
@@ -139,20 +147,22 @@ class EnsembleQFunction(nn.Module):  # type: ignore
 
 
 class EnsembleDiscreteQFunction(EnsembleQFunction):
-    def forward(self, x: torch.Tensor, reduction: str = "mean") -> torch.Tensor:
+    def forward(self, x: Union[torch.Tensor, Dict[str, torch.Tensor]], reduction: str = "mean") -> torch.Tensor:
+        B = x.size(0) if isinstance(x, torch.Tensor) else next(iter(x.values())).size(0)
         values = []
+        # TODO: we still want to handle T, B, ....
         for q_func in self._q_funcs:
-            values.append(q_func(x).view(1, x.shape[0], self._action_size))
+            values.append(q_func(x).view(1, B, self._action_size))
         return _reduce_ensemble(torch.cat(values, dim=0), reduction)
 
     def __call__(
-        self, x: torch.Tensor, reduction: str = "mean"
+        self, x: Union[torch.Tensor, Dict[str, torch.Tensor]], reduction: str = "mean"
     ) -> torch.Tensor:
         return cast(torch.Tensor, super().__call__(x, reduction))
 
     def compute_target(
         self,
-        x: torch.Tensor,
+        x: Union[torch.Tensor, Dict[str, torch.Tensor]],
         action: Optional[torch.Tensor] = None,
         reduction: str = "min",
         lam: float = 0.75,
@@ -162,21 +172,23 @@ class EnsembleDiscreteQFunction(EnsembleQFunction):
 
 class EnsembleContinuousQFunction(EnsembleQFunction):
     def forward(
-        self, x: torch.Tensor, action: torch.Tensor, reduction: str = "mean"
+        self, x: Union[torch.Tensor, Dict[str, torch.Tensor]], action: torch.Tensor, reduction: str = "mean"
     ) -> torch.Tensor:
+        B = x.size(0) if isinstance(x, torch.Tensor) else next(iter(x.values())).size(0)
         values = []
+        # TODO: we still want to handle T, B, ....
         for q_func in self._q_funcs:
-            values.append(q_func(x, action).view(1, x.shape[0], 1))
+            values.append(q_func(x, action).view(1, B, 1))
         return _reduce_ensemble(torch.cat(values, dim=0), reduction)
 
     def __call__(
-        self, x: torch.Tensor, action: torch.Tensor, reduction: str = "mean"
+        self, x: Union[torch.Tensor, Dict[str, torch.Tensor]], action: torch.Tensor, reduction: str = "mean"
     ) -> torch.Tensor:
         return cast(torch.Tensor, super().__call__(x, action, reduction))
 
     def compute_target(
         self,
-        x: torch.Tensor,
+        x: Union[torch.Tensor, Dict[str, torch.Tensor]],
         action: torch.Tensor,
         reduction: str = "min",
         lam: float = 0.75,
