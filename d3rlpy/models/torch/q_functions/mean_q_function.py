@@ -1,4 +1,4 @@
-from typing import Optional, cast
+from typing import Optional, cast, Union, Dict
 
 import torch
 import torch.nn.functional as F
@@ -20,12 +20,12 @@ class DiscreteMeanQFunction(DiscreteQFunction, nn.Module):  # type: ignore
         self._encoder = encoder
         self._fc = nn.Linear(encoder.get_feature_size(), action_size)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: Union[torch.Tensor, Dict[str, torch.Tensor]]) -> torch.Tensor:
         return cast(torch.Tensor, self._fc(self._encoder(x)))
 
     def compute_error(
         self,
-        observations: torch.Tensor,
+        observations: Union[torch.Tensor, Dict[str, torch.Tensor]],
         actions: torch.Tensor,
         rewards: torch.Tensor,
         target: torch.Tensor,
@@ -34,15 +34,19 @@ class DiscreteMeanQFunction(DiscreteQFunction, nn.Module):  # type: ignore
         reduction: str = "mean",
     ) -> torch.Tensor:
         one_hot = F.one_hot(actions.view(-1), num_classes=self.action_size)
-        value = (self.forward(observations) * one_hot.float()).sum(
+        q_out = self.forward(observations)
+        value = (q_out * one_hot.float()).sum(
             dim=1, keepdim=True
         )
+        if rewards.size(1) != 1:
+            rewards = rewards.reshape(-1, 1)
+            terminals = terminals.reshape(-1, 1)
         y = rewards + gamma * target * (1 - terminals)
         loss = compute_huber_loss(value, y)
         return compute_reduce(loss, reduction)
 
     def compute_target(
-        self, x: torch.Tensor, action: Optional[torch.Tensor] = None
+        self, x: Union[torch.Tensor, Dict[str, torch.Tensor]], action: Optional[torch.Tensor] = None
     ) -> torch.Tensor:
         if action is None:
             return self.forward(x)
@@ -68,12 +72,12 @@ class ContinuousMeanQFunction(ContinuousQFunction, nn.Module):  # type: ignore
         self._action_size = encoder.action_size
         self._fc = nn.Linear(encoder.get_feature_size(), 1)
 
-    def forward(self, x: torch.Tensor, action: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: Union[torch.Tensor, Dict[str, torch.Tensor]], action: torch.Tensor) -> torch.Tensor:
         return cast(torch.Tensor, self._fc(self._encoder(x, action)))
 
     def compute_error(
         self,
-        observations: torch.Tensor,
+        observations: Union[torch.Tensor, Dict[str, torch.Tensor]],
         actions: torch.Tensor,
         rewards: torch.Tensor,
         target: torch.Tensor,
@@ -81,13 +85,17 @@ class ContinuousMeanQFunction(ContinuousQFunction, nn.Module):  # type: ignore
         gamma: float = 0.99,
         reduction: str = "mean",
     ) -> torch.Tensor:
+        # TODO: Fix this too
         value = self.forward(observations, actions)
+        if rewards.size(1) != 1:
+            rewards = rewards.reshape(-1, 1)
+            terminals = terminals.reshape(-1, 1)
         y = rewards + gamma * target * (1 - terminals)
         loss = F.mse_loss(value, y, reduction="none")
         return compute_reduce(loss, reduction)
 
     def compute_target(
-        self, x: torch.Tensor, action: torch.Tensor
+        self, x: Union[torch.Tensor, Dict[str, torch.Tensor]], action: torch.Tensor
     ) -> torch.Tensor:
         return self.forward(x, action)
 

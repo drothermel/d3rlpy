@@ -116,13 +116,14 @@ class EnsembleQFunction(nn.Module):  # type: ignore
         reduction: str = "min",
         lam: float = 0.75,
     ) -> torch.Tensor:
-        # TODO: we still want to handle T, B, ....
-        B = x.size(0) if isinstance(x, torch.Tensor) else next(iter(x.values())).size(0)
+        Bin = x.size(0) if isinstance(x, torch.Tensor) else next(iter(x.values())).size(0)
 
         values_list: List[torch.Tensor] = []
         for q_func in self._q_funcs:
             target = q_func.compute_target(x, action)
-            values_list.append(target.reshape(1, B, -1))
+            Bout = target.size(0)
+            assert Bout % Bin == 0
+            values_list.append(target.reshape(1, Bout, -1))
 
         values = torch.cat(values_list, dim=0)
 
@@ -132,12 +133,16 @@ class EnsembleQFunction(nn.Module):  # type: ignore
             if values.shape[2] == self._action_size:
                 return _reduce_ensemble(values, reduction)
             # distributional Q function
+            Bout = values.shape[1]
             n_q_funcs = values.shape[0]
-            values = values.view(n_q_funcs, B, self._action_size, -1)
+            values = values.view(n_q_funcs, Bout, self._action_size, -1)
+            raise Exception("BEWARE: THIS MIGHT NOT WORK, this codepath hasn't been tested")
             return _reduce_quantile_ensemble(values, reduction)
 
         if values.shape[2] == 1:
             return _reduce_ensemble(values, reduction, lam=lam)
+        raise Exception("BEWARE: THIS MIGHT NOT WORK, this codepath hasn't been tested")
+
 
         return _reduce_quantile_ensemble(values, reduction, lam=lam)
 
@@ -148,11 +153,13 @@ class EnsembleQFunction(nn.Module):  # type: ignore
 
 class EnsembleDiscreteQFunction(EnsembleQFunction):
     def forward(self, x: Union[torch.Tensor, Dict[str, torch.Tensor]], reduction: str = "mean") -> torch.Tensor:
-        B = x.size(0) if isinstance(x, torch.Tensor) else next(iter(x.values())).size(0)
+        Bin = x.size(0) if isinstance(x, torch.Tensor) else next(iter(x.values())).size(0)
         values = []
-        # TODO: we still want to handle T, B, ....
         for q_func in self._q_funcs:
-            values.append(q_func(x).view(1, B, self._action_size))
+            q_out = q_func(x)
+            Bout = q_out.size(0)
+            assert Bout % Bin == 0
+            values.append(q_out.view(1, Bout, self._action_size))
         return _reduce_ensemble(torch.cat(values, dim=0), reduction)
 
     def __call__(
@@ -174,11 +181,13 @@ class EnsembleContinuousQFunction(EnsembleQFunction):
     def forward(
         self, x: Union[torch.Tensor, Dict[str, torch.Tensor]], action: torch.Tensor, reduction: str = "mean"
     ) -> torch.Tensor:
-        B = x.size(0) if isinstance(x, torch.Tensor) else next(iter(x.values())).size(0)
+        Bin = x.size(0) if isinstance(x, torch.Tensor) else next(iter(x.values())).size(0)
         values = []
-        # TODO: we still want to handle T, B, ....
         for q_func in self._q_funcs:
-            values.append(q_func(x, action).view(1, B, 1))
+            q_out = q_func(x, action)
+            Bout = q_out.size(0)
+            assert Bout % Bin == 0
+            values.append(q_out.view(1, Bout, 1))
         return _reduce_ensemble(torch.cat(values, dim=0), reduction)
 
     def __call__(

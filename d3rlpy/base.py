@@ -621,7 +621,7 @@ class LearnableBase:
             #iterator.reset()
             #for itr in range_gen:
 
-            for batch in iterator:
+            for itr, batch in enumerate(iterator):
 
                 # generate new transitions with dynamics models
                 #new_transitions = self.generate_new_data(
@@ -643,7 +643,6 @@ class LearnableBase:
                     # update parameters
                     with logger.measure_time("algorithm_update"):
                         loss = self.update(batch)
-                        raise Exception("STOP")
 
                     # record metrics
                     for name, val in loss.items():
@@ -655,7 +654,8 @@ class LearnableBase:
                         mean_loss = {
                             k: np.mean(v) for k, v in epoch_loss.items()
                         }
-                        range_gen.set_postfix(mean_loss)
+                        print(f"Batch {itr}/?  Mean loss: {mean_loss}")
+                        #range_gen.set_postfix(mean_loss)
 
                 total_step += 1
 
