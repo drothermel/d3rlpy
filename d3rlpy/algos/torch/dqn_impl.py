@@ -120,10 +120,9 @@ class DQNImpl(DiscreteQFunctionMixin, TorchImplBase):
         unclipped_grad_norm = nn.utils.clip_grad_norm_(
             self._q_func.parameters(), self._grad_clip,
         )
-        print(f"Unclipped grad norm: {unclipped_grad_norm:0.4f}")
         self._optim.step()
 
-        return loss.cpu().detach().numpy()
+        return loss.cpu().detach().numpy(), unclipped_grad_norm.cpu().numpy()
 
     def compute_loss(
         self,

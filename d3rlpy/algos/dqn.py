@@ -126,10 +126,10 @@ class DQN(AlgoBase):
 
     def _update(self, batch: TransitionMiniBatch) -> Dict[str, float]:
         assert self._impl is not None, IMPL_NOT_INITIALIZED_ERROR
-        loss = self._impl.update(batch)
+        loss, grad_norm = self._impl.update(batch)
         if self._grad_step % self._target_update_interval == 0:
             self._impl.update_target()
-        return {"loss": loss}
+        return {"loss": loss, "grad_norm": grad_norm}
 
     def get_action_type(self) -> ActionSpace:
         return ActionSpace.DISCRETE

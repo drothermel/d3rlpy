@@ -361,6 +361,7 @@ class LearnableBase:
         tensorboard_dir: Optional[str] = None,
         eval_episodes: Optional[List[Episode]] = None,
         save_interval: int = 1,
+        log_window: int = 10,
         scorers: Optional[
             Dict[str, Callable[[Any, List[Episode]], float]]
         ] = None,
@@ -418,6 +419,7 @@ class LearnableBase:
                 tensorboard_dir,
                 eval_episodes,
                 save_interval,
+                log_window,
                 scorers,
                 shuffle,
                 callback,
@@ -440,6 +442,7 @@ class LearnableBase:
         tensorboard_dir: Optional[str] = None,
         eval_episodes: Optional[List[Episode]] = None,
         save_interval: int = 1,
+        log_window: int = 10,
         scorers: Optional[
             Dict[str, Callable[[Any, List[Episode]], float]]
         ] = None,
@@ -621,7 +624,10 @@ class LearnableBase:
             #iterator.reset()
             #for itr in range_gen:
 
-            for itr, batch in enumerate(iterator):
+            for itr in range(n_steps_per_epoch):
+                batch = iterator.result()
+
+                #for itr, batch in enumerate(iterator):
 
                 # generate new transitions with dynamics models
                 #new_transitions = self.generate_new_data(
@@ -650,14 +656,15 @@ class LearnableBase:
                         epoch_loss[name].append(val)
 
                     # update progress postfix with losses
-                    if itr % 10 == 0:
+                    if itr % log_window == 0:
                         mean_loss = {
-                            k: np.mean(v) for k, v in epoch_loss.items()
+                            k: np.mean(v[-log_window:]) for k, v in epoch_loss.items()
                         }
                         print(f"Batch {itr}/?  Mean loss: {mean_loss}")
                         #range_gen.set_postfix(mean_loss)
 
                 total_step += 1
+                iterator.step()
 
                 # call callback if given
                 if callback:
