@@ -71,9 +71,6 @@ class DQNImpl(DiscreteQFunctionMixin, TorchImplBase):
         # setup torch models
         self._build_network()
 
-        # setup target network
-        self._targ_q_func = copy.deepcopy(self._q_func)
-
         if self._use_gpu:
             self.to_gpu(self._use_gpu)
         else:
@@ -90,6 +87,16 @@ class DQNImpl(DiscreteQFunctionMixin, TorchImplBase):
             self._q_func_factory,
             n_ensembles=self._n_critics,
         )
+        self._targ_q_func = create_discrete_q_function(
+            self._observation_shape,
+            self._action_size,
+            self._encoder_factory,
+            self._q_func_factory,
+            n_ensembles=self._n_critics,
+        )
+        # Note, switched to this because of a warning "The .grad attribute of
+        # a Tensor that is not a leaf Tensor is being accessed."
+        self._targ_q_func.load_state_dict(self._q_func.state_dict())
 
     def _build_optim(self) -> None:
         assert self._q_func is not None
