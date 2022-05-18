@@ -3,6 +3,7 @@ from typing import Optional, Sequence
 
 import numpy as np
 import torch
+import torch.nn as nn
 from torch.optim import Optimizer
 
 from ...gpu import Device
@@ -43,6 +44,7 @@ class DQNImpl(DiscreteQFunctionMixin, TorchImplBase):
         use_gpu: Optional[Device],
         scaler: Optional[Scaler],
         reward_scaler: Optional[RewardScaler],
+        grad_clip: Optional[float] = 5.0,
     ):
         super().__init__(
             observation_shape=observation_shape,
@@ -58,6 +60,7 @@ class DQNImpl(DiscreteQFunctionMixin, TorchImplBase):
         self._gamma = gamma
         self._n_critics = n_critics
         self._use_gpu = use_gpu
+        self._grad_clip = grad_clip
 
         # initialized in build
         self._q_func = None
@@ -106,6 +109,11 @@ class DQNImpl(DiscreteQFunctionMixin, TorchImplBase):
         loss = self.compute_loss(batch, q_tpn)
 
         loss.backward()
+
+        unclipped_grad_norm = nn.utils.clip_grad_norm_(
+            self._q_func.parameters(), self._grad_clip,
+        )
+        print(f"Unclipped grad norm: {unclipped_grad_norm:0.4f}")
         self._optim.step()
 
         return loss.cpu().detach().numpy()
@@ -125,6 +133,7 @@ class DQNImpl(DiscreteQFunctionMixin, TorchImplBase):
             gamma=self._gamma,
         )
 
+    # max_a Q(s_t+1, a)
     def compute_target(self, batch: TorchMiniBatch) -> torch.Tensor:
         assert self._targ_q_func is not None
         with torch.no_grad():
