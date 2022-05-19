@@ -2,6 +2,7 @@ import copy
 import json
 from abc import ABCMeta, abstractmethod
 from collections import defaultdict
+import random
 from typing import (
     Any,
     Callable,
@@ -19,6 +20,13 @@ from typing import (
 import gym
 import numpy as np
 from tqdm.auto import tqdm
+import concurrent.futures
+import hackrl.environment
+from hackrl.wrappers import RenderCharImagesWithNumpyWrapperV2
+import render_utils
+import torch
+from nle.nethack import tty_render
+import wandb
 
 from .argument_utility import (
     ActionScalerArg,
@@ -362,6 +370,7 @@ class LearnableBase:
         eval_episodes: Optional[List[Episode]] = None,
         save_interval: int = 1,
         log_window: int = 10,
+        flags=None,
         scorers: Optional[
             Dict[str, Callable[[Any, List[Episode]], float]]
         ] = None,
@@ -420,6 +429,7 @@ class LearnableBase:
                 eval_episodes,
                 save_interval,
                 log_window,
+                flags,
                 scorers,
                 shuffle,
                 callback,
@@ -443,6 +453,7 @@ class LearnableBase:
         eval_episodes: Optional[List[Episode]] = None,
         save_interval: int = 1,
         log_window: int = 10,
+        flags = None,
         scorers: Optional[
             Dict[str, Callable[[Any, List[Episode]], float]]
         ] = None,
@@ -661,6 +672,7 @@ class LearnableBase:
                             k: np.mean(v[-log_window:]) for k, v in epoch_loss.items()
                         }
                         print(f"Batch {itr}/?  Mean loss: {mean_loss}")
+                        wandb.log(mean_loss)
                         #range_gen.set_postfix(mean_loss)
 
                 total_step += 1
@@ -677,8 +689,8 @@ class LearnableBase:
                 if vals:
                     self._loss_history[name].append(np.mean(vals))
 
-            if scorers and eval_episodes:
-                self._evaluate(eval_episodes, scorers, logger)
+            #if scorers and eval_episodes:
+            self._evaluate(eval_episodes, scorers, logger, flags)
 
             # save metrics
             metrics = logger.commit(epoch, total_step)
@@ -812,17 +824,98 @@ class LearnableBase:
         episodes: List[Episode],
         scorers: Dict[str, Callable[[Any, List[Episode]], float]],
         logger: D3RLPyLogger,
+        flags = None,
     ) -> None:
+        """ Old Version
         for name, scorer in scorers.items():
-            # evaluation with test data
             test_score = scorer(self, episodes)
-
-            # logging metrics
             logger.add_metric(name, test_score)
-
-            # store metric locally
             if test_score is not None:
                 self._eval_results[name].append(test_score)
+        """
+
+        # Make env
+        env = hackrl.environment.create_env(flags)
+        env = RenderCharImagesWithNumpyWrapperV2(env)
+
+        model = self._impl._q_func._q_funcs[0]
+
+        def state_to_obs(state):
+            obs = state[0]
+            obs["done"] = np.array([float(state[2])])
+            for k in obs.keys():
+                obs[k] = np.expand_dims(obs[k], 0) # Batch dim
+                obs[k] = np.expand_dims(obs[k], 0) # Temporal dim
+                obs[k] = torch.from_numpy(obs[k]).to(flags.device)
+            return obs
+
+        def obs_to_action(obs, agent_state):
+            with torch.no_grad():
+                y, agent_state = model.recurrent_forward(obs, agent_state)
+            action = y.argmax(dim=1).item()
+            #action = random.choice(list(range(121)))
+            return action, agent_state
+
+        def do_step(env, action, agent_state):
+            state = env.step(action)
+            obs = state_to_obs(state)
+            action, agent_state = obs_to_action(obs, agent_state)
+            return state, action, agent_state, obs["done"]
+
+        episodes = 0
+        avg = {"return": 0, "steps": 0}
+
+        agent_state = model._encoder.initial_state()
+        state = env.reset(), None, False, None
+        obs = state_to_obs(state)
+        action, agent_state = obs_to_action(obs, agent_state)
+        while episodes < flags.n_eval_episodes:
+            step = 0
+            R = 0
+            done = False
+            while not done:
+                if False:
+                    try:
+                        print("\n".join(
+                            bytes(row).decode('utf-8').rstrip() for row in state[0]["tty_chars"].squeeze()
+                        ))
+                    except:
+                        pass
+                    print(action)
+                    print("-------------------------------------------------------")
+                state, action, agent_state, _ = do_step(env, action, agent_state)
+                _, reward, done, _ = state
+                step += 1
+                R += reward
+                #print("action", action, "R", R, "done", done, "step", step)
+            if False:
+                print(state[2], state[3])
+                print("===============================================================")
+                if episodes > 2:
+                    assert False
+
+            info = dict()
+            info["return"] = R
+            info["steps"] = step
+            info_str = ""
+            for k in ["return", "steps"]:
+                n = episodes + 1
+                avg[k] -= avg[k] / n
+                avg[k] += info[k] / n
+                info_str += f"| avg_{k} {avg[k]:0.1f} eps_{k} {info[k]:0.0f}  "
+                info[f"avg_{k}"] = avg[k]
+            #print(info_str + f"| return {R:0.0f} |")
+
+            episodes += 1
+            env.reset()
+            agent_state = model._encoder.initial_state()
+        print("Avg info:" + " ".join([f"{k} {v:0.1f}" for k, v in info.items()]))
+        eval_metrics = {f"EVAL_{k}": v for k, v in info.items() if "avg" in k}
+        for k, v in eval_metrics.items():
+            logger.add_metric(k, v)
+        wandb.log(eval_metrics)
+
+
 
     def save_params(self, logger: D3RLPyLogger) -> None:
         """Saves configurations as params.json.

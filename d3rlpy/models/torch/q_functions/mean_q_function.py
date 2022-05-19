@@ -23,6 +23,11 @@ class DiscreteMeanQFunction(DiscreteQFunction, nn.Module):  # type: ignore
     def forward(self, x: Union[torch.Tensor, Dict[str, torch.Tensor]]) -> torch.Tensor:
         return cast(torch.Tensor, self._fc(self._encoder(x)))
 
+    def recurrent_forward(self, x: Union[torch.Tensor, Dict[str, torch.Tensor]], agent_state=None) -> torch.Tensor:
+        #return cast(torch.Tensor, self._fc(self._encoder(x)))
+        y, agent_state = self._encoder(x, agent_state)
+        return self._fc(y), agent_state
+
     def compute_error(
         self,
         observations: Union[torch.Tensor, Dict[str, torch.Tensor]],
