@@ -305,6 +305,12 @@ class CategoricalPolicy(Policy):
         h = self._fc(h)
         return Categorical(torch.softmax(h, dim=1))
 
+    def recurrent_dist(self, x: torch.Tensor, agent_state) -> Categorical:
+        h, agent_state = self._encoder(x, agent_state)
+        h = self._fc(h)
+        return Categorical(torch.softmax(h, dim=1)), agent_state
+
+
     def forward(
         self,
         x: torch.Tensor,
@@ -322,6 +328,15 @@ class CategoricalPolicy(Policy):
             return action, dist.log_prob(action)
 
         return action
+
+    def recurrent_best_action(
+        self,
+        x: torch.Tensor,
+        agent_state,
+    ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
+        dist, agent_state = self.recurrent_dist(x, agent_state)
+        action = cast(torch.Tensor, dist.probs.argmax(dim=1))
+        return action, agent_state
 
     def sample_with_log_prob(
         self, x: torch.Tensor

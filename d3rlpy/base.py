@@ -838,7 +838,10 @@ class LearnableBase:
         env = hackrl.environment.create_env(flags)
         env = RenderCharImagesWithNumpyWrapperV2(env)
 
-        model = self._impl._q_func._q_funcs[0]
+        try:
+            model = self._impl._policy
+        except:
+            model = self._impl._q_func._q_funcs[0]
 
         def state_to_obs(state):
             obs = state[0]
@@ -851,8 +854,9 @@ class LearnableBase:
 
         def obs_to_action(obs, agent_state):
             with torch.no_grad():
-                y, agent_state = model.recurrent_forward(obs, agent_state)
-            action = y.argmax(dim=1).item()
+                action, agent_state = model.recurrent_best_action(
+                    obs, agent_state,
+                )
             #action = random.choice(list(range(121)))
             return action, agent_state
 
@@ -941,7 +945,9 @@ class LearnableBase:
         params["observation_shape"] = self._impl.observation_shape
         params["action_size"] = self._impl.action_size
         # The encoder factory could be a class that is not serializable
-        del params["encoder_factory"]
+        for k in list(params.keys()):
+            if "encoder_factory" in k:
+                del params[k]
 
         # serialize objects
         params = _serialize_params(params)
