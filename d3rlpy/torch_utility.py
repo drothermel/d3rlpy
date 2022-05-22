@@ -149,31 +149,46 @@ def _convert_to_torch(array: np.ndarray, device: str) -> torch.Tensor:
     return tensor.float()
 
 
+AltTransitionMiniBatch = collections.namedtuple(
+    "AltTransitionMiniBatch",
+    "observations, actions, rewards, next_observations, terminals, n_steps",
+)
+
+
 class TorchMiniBatch:
 
-    _observations: torch.Tensor
+    _observations: Union[torch.Tensor, Dict[str, torch.Tensor]]
     _actions: torch.Tensor
     _rewards: torch.Tensor
-    _next_observations: torch.Tensor
+    _next_observations: Union[torch.Tensor, Dict[str, torch.Tensor]]
     _terminals: torch.Tensor
-    _n_steps: torch.Tensor
+    _n_steps: Union[torch.Tensor, int]
     _device: str
 
     def __init__(
         self,
-        batch: TransitionMiniBatch,
+        batch: Union[TransitionMiniBatch, AltTransitionMiniBatch],
         device: str,
         scaler: Optional[Scaler] = None,
         action_scaler: Optional[ActionScaler] = None,
         reward_scaler: Optional[RewardScaler] = None,
     ):
-        # convert numpy array to torch tensor
-        observations = _convert_to_torch(batch.observations, device)
-        actions = _convert_to_torch(batch.actions, device)
-        rewards = _convert_to_torch(batch.rewards, device)
-        next_observations = _convert_to_torch(batch.next_observations, device)
-        terminals = _convert_to_torch(batch.terminals, device)
-        n_steps = _convert_to_torch(batch.n_steps, device)
+        if isinstance(batch.rewards, torch.Tensor):
+            observations = batch.observations
+            actions = batch.actions
+            rewards = batch.rewards
+            next_observations = batch.next_observations
+            terminals = batch.terminals
+            n_steps = batch.n_steps
+            device = batch.rewards.device
+        else:
+            # convert numpy array to torch tensor
+            observations = _convert_to_torch(batch.observations, device)
+            actions = _convert_to_torch(batch.actions, device)
+            rewards = _convert_to_torch(batch.rewards, device)
+            next_observations = _convert_to_torch(batch.next_observations, device)
+            terminals = _convert_to_torch(batch.terminals, device)
+            n_steps = _convert_to_torch(batch.n_steps, device)
 
         # apply scaler
         if scaler:
