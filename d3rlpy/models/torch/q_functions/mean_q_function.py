@@ -1,4 +1,4 @@
-from typing import Optional, cast, Union, Dict, List
+from typing import Optional, cast, Union, Dict, List, Tuple
 
 import torch
 import torch.nn.functional as F
@@ -70,6 +70,21 @@ class DiscreteMeanQFunction(DiscreteQFunction, nn.Module):  # type: ignore
         if action is None:
             return q_out
         return pick_value_by_action(q_out, action, keepdim=True)
+
+    def best_action(
+        self,
+        x: Union[torch.Tensor, Dict[str, torch.Tensor]],
+        recurrent_state: Optional[torch.Tensor] = None,
+    ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
+        if recurrent_state is not None:
+            q_out, recurrent_state = self.forward(x, recurrent_state)
+        else:
+            q_out = self.forward(x)
+
+        action = q_out.argmax(dim=1)
+        if recurrent_state is not None:
+            return action, recurrent_state
+        return action
 
     @property
     def action_size(self) -> int:
