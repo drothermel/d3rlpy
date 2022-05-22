@@ -43,6 +43,7 @@ class DQNImpl(DiscreteQFunctionMixin, TorchImplBase):
         use_gpu: Optional[Device],
         scaler: Optional[Scaler],
         reward_scaler: Optional[RewardScaler],
+        grad_clip: float = 5.0,
     ):
         super().__init__(
             observation_shape=observation_shape,
@@ -58,6 +59,7 @@ class DQNImpl(DiscreteQFunctionMixin, TorchImplBase):
         self._gamma = gamma
         self._n_critics = n_critics
         self._use_gpu = use_gpu
+        self._grad_clip = grad_clip
 
         # initialized in build
         self._q_func = None
@@ -95,7 +97,7 @@ class DQNImpl(DiscreteQFunctionMixin, TorchImplBase):
         )
 
     @train_api
-    @torch_api(scaler_targets=["obs_t", "obs_tpn"])
+    #@torch_api(scaler_targets=["obs_t", "obs_tpn"])
     def update(self, batch: TorchMiniBatch) -> np.ndarray:
         assert self._optim is not None
 
@@ -106,9 +108,12 @@ class DQNImpl(DiscreteQFunctionMixin, TorchImplBase):
         loss = self.compute_loss(batch, q_tpn)
 
         loss.backward()
+        unclipped_grad_norm = torch.nn.utils.clip_grad_norm_(
+            self._q_func.parameters(), self._grad_clip,
+        )
         self._optim.step()
 
-        return loss.cpu().detach().numpy()
+        return loss.cpu().detach().numpy(), unclipped_grad_norm.cpu().numpy()
 
     def compute_loss(
         self,
