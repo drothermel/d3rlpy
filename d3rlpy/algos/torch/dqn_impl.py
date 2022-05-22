@@ -3,6 +3,7 @@ from typing import Optional, Sequence
 
 import numpy as np
 import torch
+import torch.nn as nn
 from torch.optim import Optimizer
 
 from ...gpu import Device
@@ -43,6 +44,7 @@ class DQNImpl(DiscreteQFunctionMixin, TorchImplBase):
         use_gpu: Optional[Device],
         scaler: Optional[Scaler],
         reward_scaler: Optional[RewardScaler],
+        grad_clip: Optional[float] = 5.0,
     ):
         super().__init__(
             observation_shape=observation_shape,
@@ -58,6 +60,7 @@ class DQNImpl(DiscreteQFunctionMixin, TorchImplBase):
         self._gamma = gamma
         self._n_critics = n_critics
         self._use_gpu = use_gpu
+        self._grad_clip = grad_clip
 
         # initialized in build
         self._q_func = None
@@ -67,9 +70,6 @@ class DQNImpl(DiscreteQFunctionMixin, TorchImplBase):
     def build(self) -> None:
         # setup torch models
         self._build_network()
-
-        # setup target network
-        self._targ_q_func = copy.deepcopy(self._q_func)
 
         if self._use_gpu:
             self.to_gpu(self._use_gpu)
@@ -87,6 +87,16 @@ class DQNImpl(DiscreteQFunctionMixin, TorchImplBase):
             self._q_func_factory,
             n_ensembles=self._n_critics,
         )
+        self._targ_q_func = create_discrete_q_function(
+            self._observation_shape,
+            self._action_size,
+            self._encoder_factory,
+            self._q_func_factory,
+            n_ensembles=self._n_critics,
+        )
+        # Note, switched to this because of a warning "The .grad attribute of
+        # a Tensor that is not a leaf Tensor is being accessed."
+        self._targ_q_func.load_state_dict(self._q_func.state_dict())
 
     def _build_optim(self) -> None:
         assert self._q_func is not None
@@ -95,7 +105,7 @@ class DQNImpl(DiscreteQFunctionMixin, TorchImplBase):
         )
 
     @train_api
-    @torch_api(scaler_targets=["obs_t", "obs_tpn"])
+    #@torch_api(scaler_targets=["obs_t", "obs_tpn"])
     def update(self, batch: TorchMiniBatch) -> np.ndarray:
         assert self._optim is not None
 
@@ -106,9 +116,13 @@ class DQNImpl(DiscreteQFunctionMixin, TorchImplBase):
         loss = self.compute_loss(batch, q_tpn)
 
         loss.backward()
+
+        unclipped_grad_norm = nn.utils.clip_grad_norm_(
+            self._q_func.parameters(), self._grad_clip,
+        )
         self._optim.step()
 
-        return loss.cpu().detach().numpy()
+        return loss.cpu().detach().numpy(), unclipped_grad_norm.cpu().numpy()
 
     def compute_loss(
         self,
@@ -122,9 +136,10 @@ class DQNImpl(DiscreteQFunctionMixin, TorchImplBase):
             rewards=batch.rewards,
             target=q_tpn,
             terminals=batch.terminals,
-            gamma=self._gamma**batch.n_steps,
+            gamma=self._gamma,
         )
 
+    # max_a Q(s_t+1, a)
     def compute_target(self, batch: TorchMiniBatch) -> torch.Tensor:
         assert self._targ_q_func is not None
         with torch.no_grad():

@@ -199,4 +199,5 @@ class IQL(AlgoBase):
         return metrics
 
     def get_action_type(self) -> ActionSpace:
-        return ActionSpace.CONTINUOUS
+        #return ActionSpace.CONTINUOUS
+        return ActionSpace.DISCRETE

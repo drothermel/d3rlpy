@@ -121,7 +121,7 @@ class SACImpl(DDPGBaseImpl):
         return (entropy - q_t).mean()
 
     @train_api
-    @torch_api()
+    #@torch_api()
     def update_temp(
         self, batch: TorchMiniBatch
     ) -> Tuple[np.ndarray, np.ndarray]:
@@ -241,7 +241,7 @@ class DiscreteSACImpl(DiscreteQFunctionMixin, TorchImplBase):
         self._build_temperature()
 
         # setup target networks
-        self._targ_q_func = copy.deepcopy(self._q_func)
+        #self._targ_q_func = copy.deepcopy(self._q_func)
 
         if self._use_gpu:
             self.to_gpu(self._use_gpu)
@@ -255,6 +255,13 @@ class DiscreteSACImpl(DiscreteQFunctionMixin, TorchImplBase):
 
     def _build_critic(self) -> None:
         self._q_func = create_discrete_q_function(
+            self._observation_shape,
+            self._action_size,
+            self._critic_encoder_factory,
+            self._q_func_factory,
+            n_ensembles=self._n_critics,
+        )
+        self._targ_q_func = create_discrete_q_function(
             self._observation_shape,
             self._action_size,
             self._critic_encoder_factory,
@@ -292,7 +299,7 @@ class DiscreteSACImpl(DiscreteQFunctionMixin, TorchImplBase):
         )
 
     @train_api
-    @torch_api()
+    #@torch_api()
     def update_critic(self, batch: TorchMiniBatch) -> np.ndarray:
         assert self._critic_optim is not None
 
@@ -334,11 +341,12 @@ class DiscreteSACImpl(DiscreteQFunctionMixin, TorchImplBase):
             rewards=batch.rewards,
             target=q_tpn,
             terminals=batch.terminals,
-            gamma=self._gamma**batch.n_steps,
+            #gamma=self._gamma**batch.n_steps,
+            gamma = self._gamma,
         )
 
     @train_api
-    @torch_api()
+    #@torch_api()
     def update_actor(self, batch: TorchMiniBatch) -> np.ndarray:
         assert self._q_func is not None
         assert self._actor_optim is not None
@@ -367,7 +375,7 @@ class DiscreteSACImpl(DiscreteQFunctionMixin, TorchImplBase):
         return (probs * (entropy - q_t)).sum(dim=1).mean()
 
     @train_api
-    @torch_api()
+    #@torch_api()
     def update_temp(self, batch: TorchMiniBatch) -> np.ndarray:
         assert self._temp_optim is not None
         assert self._policy is not None
