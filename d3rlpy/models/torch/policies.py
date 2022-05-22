@@ -1,6 +1,6 @@
 import math
 from abc import ABCMeta, abstractmethod
-from typing import Tuple, Union, cast
+from typing import Tuple, Union, cast, Dict, Optional
 
 import torch
 import torch.nn.functional as F
@@ -64,16 +64,12 @@ class DeterministicPolicy(Policy):
     def sample_with_log_prob(
         self, x: torch.Tensor
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        raise NotImplementedError(
-            "deterministic policy does not support sample"
-        )
+        raise NotImplementedError("deterministic policy does not support sample")
 
     def sample_n_with_log_prob(
         self, x: torch.Tensor, n: int
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        raise NotImplementedError(
-            "deterministic policy does not support sample_n"
-        )
+        raise NotImplementedError("deterministic policy does not support sample_n")
 
     def best_action(self, x: torch.Tensor) -> torch.Tensor:
         return self.forward(x)
@@ -105,23 +101,17 @@ class DeterministicResidualPolicy(Policy):
         return self.forward(x, action)
 
     def best_action(self, x: torch.Tensor) -> torch.Tensor:
-        raise NotImplementedError(
-            "residual policy does not support best_action"
-        )
+        raise NotImplementedError("residual policy does not support best_action")
 
     def sample_with_log_prob(
         self, x: torch.Tensor
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        raise NotImplementedError(
-            "deterministic policy does not support sample"
-        )
+        raise NotImplementedError("deterministic policy does not support sample")
 
     def sample_n_with_log_prob(
         self, x: torch.Tensor, n: int
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        raise NotImplementedError(
-            "deterministic policy does not support sample_n"
-        )
+        raise NotImplementedError("deterministic policy does not support sample_n")
 
 
 class NormalPolicy(Policy):
@@ -300,39 +290,72 @@ class CategoricalPolicy(Policy):
         self._encoder = encoder
         self._fc = nn.Linear(encoder.get_feature_size(), action_size)
 
-    def dist(self, x: torch.Tensor) -> Categorical:
-        h = self._encoder(x)
+    def dist(
+        self,
+        x: Union[torch.Tensor, Dict[str, torch.Tensor]],
+        recurrent_state: Optional[torch.Tensor] = None,
+    ) -> Union[Categorical, Tuple[Categorical, torch.Tensor]]:
+        if recurrent_state is not None:
+            h, recurrent_state = self._encoder(x, recurrent_state)
+        else:
+            h = self._encoder(x)
         h = self._fc(h)
-        return Categorical(torch.softmax(h, dim=1))
+        out = Categorical(torch.softmax(h, dim=1))
+        if recurrent_state is not None:
+            return out, recurrent_state
+        return out
 
     def forward(
         self,
-        x: torch.Tensor,
+        x: Union[torch.Tensor, Dict[str, torch.Tensor]],
         deterministic: bool = False,
         with_log_prob: bool = False,
+        recurrent_state: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
-        dist = self.dist(x)
+        if recurrent_state is not None:
+            dist, recurrent_state = self.dist(x, recurrent_state)
+        else:
+            dist = self.dist(x)
 
         if deterministic:
             action = cast(torch.Tensor, dist.probs.argmax(dim=1))
         else:
             action = cast(torch.Tensor, dist.sample())
 
+        out = [action]
         if with_log_prob:
-            return action, dist.log_prob(action)
+            out.append(dist.log_prob(action))
 
-        return action
+        if recurrent_state is not None:
+            out.append(recurrent_state)
+
+        if len(out) == 1:
+            return out[0]
+        return tuple(out)
 
     def sample_with_log_prob(
-        self, x: torch.Tensor
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
-        out = self.forward(x, with_log_prob=True)
-        return cast(Tuple[torch.Tensor, torch.Tensor], out)
+        self,
+        x: Union[torch.Tensor, Dict[str, torch.Tensor]],
+        recurrent_state: Optional[torch.Tensor] = None,
+    ) -> Union[
+        Tuple[torch.Tensor, torch.Tensor],
+        Tuple[torch.Tensor, torch.Tensor, torch.Tensor],
+    ]:
+        return self.forward(x, with_log_prob=True, recurrent_state=recurrent_state)
 
     def sample_n_with_log_prob(
-        self, x: torch.Tensor, n: int
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
-        dist = self.dist(x)
+        self,
+        x: Union[torch.Tensor, Dict[str, torch.Tensor]],
+        n: int,
+        recurrent_state: Optional[torch.Tensor] = None,
+    ) -> Union[
+        Tuple[torch.Tensor, torch.Tensor],
+        Tuple[torch.Tensor, torch.Tensor, torch.Tensor],
+    ]:
+        if recurrent_state is not None:
+            dist, recurrent_state = self.dist(x, recurrent_state)
+        else:
+            dist = self.dist(x)
 
         action_T = cast(torch.Tensor, dist.sample((n,)))
         log_prob_T = dist.log_prob(action_T)
@@ -342,11 +365,25 @@ class CategoricalPolicy(Policy):
         # (n, batch) -> (batch, n)
         log_prob = log_prob_T.transpose(0, 1)
 
+        if recurrent_state is not None:
+            return action, log_prob, recurrent_state
         return action, log_prob
 
-    def best_action(self, x: torch.Tensor) -> torch.Tensor:
-        return cast(torch.Tensor, self.forward(x, deterministic=True))
+    def best_action(
+        self,
+        x: Union[torch.Tensor, Dict[str, torch.Tensor]],
+        recurrent_state: Optional[torch.Tensor] = None,
+    ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
+        return self.forward(x, deterministic=True, recurrent_state=recurrent_state)
 
-    def log_probs(self, x: torch.Tensor) -> torch.Tensor:
-        dist = self.dist(x)
-        return cast(torch.Tensor, dist.logits)
+    def log_probs(
+        self,
+        x: Union[torch.Tensor, Dict[str, torch.Tensor]],
+        recurrent_state: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        if recurrent_state is None:
+            dist = self.dist(x)
+            return dist.logits
+        else:
+            dist, recurrent_state = self.dist(x, recurrent_state)
+            return dist.logits, recurrent_state

@@ -1,4 +1,4 @@
-from typing import List, Optional, Union, cast
+from typing import List, Optional, Union, cast, Dict, Tuple
 
 import torch
 from torch import nn
@@ -80,18 +80,22 @@ class EnsembleQFunction(nn.Module):  # type: ignore
 
     def compute_error(
         self,
-        observations: torch.Tensor,
+        observations: Union[torch.Tensor, Dict[str, torch.Tensor]],
         actions: torch.Tensor,
         rewards: torch.Tensor,
         target: torch.Tensor,
         terminals: torch.Tensor,
         gamma: float = 0.99,
+        recurrent_state: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         assert target.ndim == 2
-
-        td_sum = torch.tensor(
-            0.0, dtype=torch.float32, device=observations.device
+        device = (
+            observations.device
+            if isinstance(observations, torch.Tensor)
+            else next(iter(observations.values())).device
         )
+
+        td_sum = torch.tensor(0.0, dtype=torch.float32, device=device)
         for q_func in self._q_funcs:
             loss = q_func.compute_error(
                 observations=observations,
@@ -101,21 +105,29 @@ class EnsembleQFunction(nn.Module):  # type: ignore
                 terminals=terminals,
                 gamma=gamma,
                 reduction="none",
+                recurrent_state=recurrent_state,
             )
             td_sum += loss.mean()
         return td_sum
 
     def _compute_target(
         self,
-        x: torch.Tensor,
+        x: Union[torch.Tensor, Dict[str, torch.Tensor]],
         action: Optional[torch.Tensor] = None,
         reduction: str = "min",
         lam: float = 0.75,
+        recurrent_state: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
+        Bin = (
+            x.size(0) if isinstance(x, torch.Tensor) else next(iter(x.values())).size(0)
+        )
+
         values_list: List[torch.Tensor] = []
         for q_func in self._q_funcs:
-            target = q_func.compute_target(x, action)
-            values_list.append(target.reshape(1, x.shape[0], -1))
+            target = q_func.compute_target(x, action, recurrent_state=recurrent_state)
+            Bout = target.size(0)
+            assert Bout % Bin == 0
+            values_list.append(target.reshape(1, Bout, -1))
 
         values = torch.cat(values_list, dim=0)
 
@@ -124,8 +136,10 @@ class EnsembleQFunction(nn.Module):  # type: ignore
             if values.shape[2] == self._action_size:
                 return _reduce_ensemble(values, reduction)
             # distributional Q function
+            Bout = values.shape[1]
             n_q_funcs = values.shape[0]
-            values = values.view(n_q_funcs, x.shape[0], self._action_size, -1)
+            values = values.view(n_q_funcs, Bout, self._action_size, -1)
+            print("BEWARE: THIS MIGHT NOT WORK, this codepath hasn't been tested")
             return _reduce_quantile_ensemble(values, reduction)
 
         if values.shape[2] == 1:
@@ -139,25 +153,50 @@ class EnsembleQFunction(nn.Module):  # type: ignore
 
 
 class EnsembleDiscreteQFunction(EnsembleQFunction):
-    def forward(self, x: torch.Tensor, reduction: str = "mean") -> torch.Tensor:
+    def forward(
+        self,
+        x: Union[torch.Tensor, Dict[str, torch.Tensor]],
+        reduction: str = "mean",
+        recurrent_state: Optional[torch.Tensor] = None,
+    ) -> Union[torch.Tensor, Tuple[torch.Tensor, List[torch.Tensor]]]:
+        Bin = (
+            x.size(0) if isinstance(x, torch.Tensor) else next(iter(x.values())).size(0)
+        )
         values = []
+        recurrent_states = []
         for q_func in self._q_funcs:
-            values.append(q_func(x).view(1, x.shape[0], self._action_size))
-        return _reduce_ensemble(torch.cat(values, dim=0), reduction)
+            if recurrent_state is None:
+                q_out = q_func(x)
+            else:
+                q_out, recurrent_state = q_func(x, recurrent_state=recurrent_state)
+            Bout = q_out.size(0)
+            assert Bout % Bin == 0
+            q_out = q_out.view(1, Bout, self._action_size)
+            values.append(q_out)
+            recurrent_states.append(recurrent_state)
+        reduced_q_out = _reduce_ensemble(torch.cat(values, dim=0), reduction)
+        if recurrent_state is None:
+            return reduced_q_out
+        else:
+            return reduced_q_out, recurrent_states
 
     def __call__(
-        self, x: torch.Tensor, reduction: str = "mean"
+        self,
+        x: Union[torch.Tensor, Dict[str, torch.Tensor]],
+        reduction: str = "mean",
+        recurrent_state: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        return cast(torch.Tensor, super().__call__(x, reduction))
+        return super().__call__(x, reduction=reduction, recurrent_state=recurrent_state)
 
     def compute_target(
         self,
-        x: torch.Tensor,
+        x: Union[torch.Tensor, Dict[str, torch.Tensor]],
         action: Optional[torch.Tensor] = None,
         reduction: str = "min",
         lam: float = 0.75,
+        recurrent_state: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        return self._compute_target(x, action, reduction, lam)
+        return self._compute_target(x, action, reduction, lam, recurrent_state)
 
 
 class EnsembleContinuousQFunction(EnsembleQFunction):

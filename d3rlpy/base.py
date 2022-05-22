@@ -20,6 +20,10 @@ import gym
 import numpy as np
 from tqdm.auto import tqdm
 
+import wandb
+from nle_offline_baselines.dataset_utils import TtyrecEnvPool
+from nle_offline_baselines.d3rlpy_adaptors import evaluate_nle
+
 from .argument_utility import (
     ActionScalerArg,
     RewardScalerArg,
@@ -118,13 +122,9 @@ def _deseriealize_params(params: Dict[str, Any]) -> Dict[str, Any]:
         elif "optim_factory" in key:
             params[key] = OptimizerFactory(**value)
         elif "encoder_factory" in key:
-            params[key] = create_encoder_factory(
-                value["type"], **value["params"]
-            )
+            params[key] = create_encoder_factory(value["type"], **value["params"])
         elif key == "q_func_factory":
-            params[key] = create_q_func_factory(
-                value["type"], **value["params"]
-            )
+            params[key] = create_q_func_factory(value["type"], **value["params"])
     return params
 
 
@@ -185,9 +185,7 @@ class LearnableBase:
             setattr(self._impl, name, value)
 
     @classmethod
-    def from_json(
-        cls, fname: str, use_gpu: UseGPUArg = False
-    ) -> "LearnableBase":
+    def from_json(cls, fname: str, use_gpu: UseGPUArg = False) -> "LearnableBase":
         """Returns algorithm configured with json file.
 
         The Json file should be the one saved during fitting.
@@ -348,7 +346,7 @@ class LearnableBase:
 
     def fit(
         self,
-        dataset: Union[List[Episode], List[Transition], MDPDataset],
+        dataset: Union[List[Episode], List[Transition], MDPDataset, TtyrecEnvPool],
         n_epochs: Optional[int] = None,
         n_steps: Optional[int] = None,
         n_steps_per_epoch: int = 10000,
@@ -361,11 +359,11 @@ class LearnableBase:
         tensorboard_dir: Optional[str] = None,
         eval_episodes: Optional[List[Episode]] = None,
         save_interval: int = 1,
-        scorers: Optional[
-            Dict[str, Callable[[Any, List[Episode]], float]]
-        ] = None,
+        scorers: Optional[Dict[str, Callable[[Any, List[Episode]], float]]] = None,
         shuffle: bool = True,
         callback: Optional[Callable[["LearnableBase", int, int], None]] = None,
+        log_window: Optional[int] = 10,
+        flags=None,
     ) -> List[Tuple[int, Dict[str, float]]]:
         """Trains with the given dataset.
 
@@ -421,6 +419,8 @@ class LearnableBase:
                 scorers,
                 shuffle,
                 callback,
+                log_window,
+                flags,
             )
         )
         return results
@@ -440,11 +440,11 @@ class LearnableBase:
         tensorboard_dir: Optional[str] = None,
         eval_episodes: Optional[List[Episode]] = None,
         save_interval: int = 1,
-        scorers: Optional[
-            Dict[str, Callable[[Any, List[Episode]], float]]
-        ] = None,
+        scorers: Optional[Dict[str, Callable[[Any, List[Episode]], float]]] = None,
         shuffle: bool = True,
         callback: Optional[Callable[["LearnableBase", int, int], None]] = None,
+        log_window: Optional[int] = None,
+        flags=None,
     ) -> Generator[Tuple[int, Dict[str, float]], None, None]:
         """Iterate over epochs steps to train with the given dataset. At each
              iteration algo methods and properties can be changed or queried.
@@ -486,61 +486,64 @@ class LearnableBase:
 
         """
 
-        transitions = []
-        if isinstance(dataset, MDPDataset):
-            for episode in dataset.episodes:
-                transitions += episode.transitions
-        elif not dataset:
-            raise ValueError("empty dataset is not supported.")
-        elif isinstance(dataset[0], Episode):
-            for episode in cast(List[Episode], dataset):
-                transitions += episode.transitions
-        elif isinstance(dataset[0], Transition):
-            transitions = list(cast(List[Transition], dataset))
+        if isinstance(dataset, TtyrecEnvPool):
+            iterator = dataset
         else:
-            raise ValueError(f"invalid dataset type: {type(dataset)}")
+            transitions = []
+            if isinstance(dataset, MDPDataset):
+                for episode in dataset.episodes:
+                    transitions += episode.transitions
+            elif not dataset:
+                raise ValueError("empty dataset is not supported.")
+            elif isinstance(dataset[0], Episode):
+                for episode in cast(List[Episode], dataset):
+                    transitions += episode.transitions
+            elif isinstance(dataset[0], Transition):
+                transitions = list(cast(List[Transition], dataset))
+            else:
+                raise ValueError(f"invalid dataset type: {type(dataset)}")
 
-        # check action space
-        if self.get_action_type() == ActionSpace.BOTH:
-            pass
-        elif transitions[0].is_discrete:
-            assert (
-                self.get_action_type() == ActionSpace.DISCRETE
-            ), DISCRETE_ACTION_SPACE_MISMATCH_ERROR
-        else:
-            assert (
-                self.get_action_type() == ActionSpace.CONTINUOUS
-            ), CONTINUOUS_ACTION_SPACE_MISMATCH_ERROR
+            # check action space
+            if self.get_action_type() == ActionSpace.BOTH:
+                pass
+            elif transitions[0].is_discrete:
+                assert (
+                    self.get_action_type() == ActionSpace.DISCRETE
+                ), DISCRETE_ACTION_SPACE_MISMATCH_ERROR
+            else:
+                assert (
+                    self.get_action_type() == ActionSpace.CONTINUOUS
+                ), CONTINUOUS_ACTION_SPACE_MISMATCH_ERROR
 
-        iterator: TransitionIterator
-        if n_epochs is None and n_steps is not None:
-            assert n_steps >= n_steps_per_epoch
-            n_epochs = n_steps // n_steps_per_epoch
-            iterator = RandomIterator(
-                transitions,
-                n_steps_per_epoch,
-                batch_size=self._batch_size,
-                n_steps=self._n_steps,
-                gamma=self._gamma,
-                n_frames=self._n_frames,
-                real_ratio=self._real_ratio,
-                generated_maxlen=self._generated_maxlen,
-            )
-            LOG.debug("RandomIterator is selected.")
-        elif n_epochs is not None and n_steps is None:
-            iterator = RoundIterator(
-                transitions,
-                batch_size=self._batch_size,
-                n_steps=self._n_steps,
-                gamma=self._gamma,
-                n_frames=self._n_frames,
-                real_ratio=self._real_ratio,
-                generated_maxlen=self._generated_maxlen,
-                shuffle=shuffle,
-            )
-            LOG.debug("RoundIterator is selected.")
-        else:
-            raise ValueError("Either of n_epochs or n_steps must be given.")
+            iterator: TransitionIterator
+            if n_epochs is None and n_steps is not None:
+                assert n_steps >= n_steps_per_epoch
+                n_epochs = n_steps // n_steps_per_epoch
+                iterator = RandomIterator(
+                    transitions,
+                    n_steps_per_epoch,
+                    batch_size=self._batch_size,
+                    n_steps=self._n_steps,
+                    gamma=self._gamma,
+                    n_frames=self._n_frames,
+                    real_ratio=self._real_ratio,
+                    generated_maxlen=self._generated_maxlen,
+                )
+                LOG.debug("RandomIterator is selected.")
+            elif n_epochs is not None and n_steps is None:
+                iterator = RoundIterator(
+                    transitions,
+                    batch_size=self._batch_size,
+                    n_steps=self._n_steps,
+                    gamma=self._gamma,
+                    n_frames=self._n_frames,
+                    real_ratio=self._real_ratio,
+                    generated_maxlen=self._generated_maxlen,
+                    shuffle=shuffle,
+                )
+                LOG.debug("RoundIterator is selected.")
+            else:
+                raise ValueError("Either of n_epochs or n_steps must be given.")
 
         # setup logger
         logger = self._prepare_logger(
@@ -579,12 +582,16 @@ class LearnableBase:
         # instantiate implementation
         if self._impl is None:
             LOG.debug("Building models...")
-            transition = iterator.transitions[0]
-            action_size = transition.get_action_size()
-            observation_shape = tuple(transition.get_observation_shape())
-            self.create_impl(
-                self._process_observation_shape(observation_shape), action_size
-            )
+            if isinstance(iterator, TtyrecEnvPool):
+                action_size = 121
+                observation_shape = [2, 81, 81]  # Ignored
+            else:
+                transition = iterator.transitions[0]
+                action_size = transition.get_action_size()
+                observation_shape = tuple(transition.get_observation_shape())
+                observation_shape = self._process_observation_shape(observation_shape)
+                n_steps_per_epoch = len(iterator)
+            self.create_impl(observation_shape, action_size)
             LOG.debug("Models have been built.")
         else:
             LOG.warning("Skip building models since they're already built.")
@@ -606,31 +613,36 @@ class LearnableBase:
             epoch_loss = defaultdict(list)
 
             range_gen = tqdm(
-                range(len(iterator)),
+                range(n_steps_per_epoch),
                 disable=not show_progress,
                 desc=f"Epoch {int(epoch)}/{n_epochs}",
             )
 
-            iterator.reset()
+            if not isinstance(iterator, TtyrecEnvPool):
+                iterator.reset()
 
             for itr in range_gen:
 
-                # generate new transitions with dynamics models
-                new_transitions = self.generate_new_data(
-                    transitions=iterator.transitions,
-                )
-                if new_transitions:
-                    iterator.add_generated_transitions(new_transitions)
-                    LOG.debug(
-                        f"{len(new_transitions)} transitions are generated.",
-                        real_transitions=len(iterator.transitions),
-                        fake_transitions=len(iterator.generated_transitions),
+                if not isinstance(iterator, TtyrecEnvPool):
+                    # generate new transitions with dynamics models
+                    new_transitions = self.generate_new_data(
+                        transitions=iterator.transitions,
                     )
+                    if new_transitions:
+                        iterator.add_generated_transitions(new_transitions)
+                        LOG.debug(
+                            f"{len(new_transitions)} transitions are generated.",
+                            real_transitions=len(iterator.transitions),
+                            fake_transitions=len(iterator.generated_transitions),
+                        )
 
                 with logger.measure_time("step"):
                     # pick transitions
                     with logger.measure_time("sample_batch"):
-                        batch = next(iterator)
+                        if isinstance(iterator, TtyrecEnvPool):
+                            batch = iterator.result()
+                        else:
+                            batch = next(iterator)
 
                     # update parameters
                     with logger.measure_time("algorithm_update"):
@@ -642,13 +654,17 @@ class LearnableBase:
                         epoch_loss[name].append(val)
 
                     # update progress postfix with losses
-                    if itr % 10 == 0:
+                    if itr % log_window == 0:
                         mean_loss = {
-                            k: np.mean(v) for k, v in epoch_loss.items()
+                            k: np.mean(v[-log_window:]) for k, v in epoch_loss.items()
                         }
                         range_gen.set_postfix(mean_loss)
+                        if flags is not None and flags.wandb:
+                            wandb.log(mean_loss, step=total_step)
 
                 total_step += 1
+                if isinstance(iterator, TtyrecEnvPool):
+                    iterator.step()
 
                 # call callback if given
                 if callback:
@@ -661,11 +677,14 @@ class LearnableBase:
                 if vals:
                     self._loss_history[name].append(np.mean(vals))
 
-            if scorers and eval_episodes:
-                self._evaluate(eval_episodes, scorers, logger)
+            self._evaluate(eval_episodes, scorers, logger, flags)
 
             # save metrics
             metrics = logger.commit(epoch, total_step)
+            if flags is not None and flags.wandb:
+                metrics["optimizer_step"] = total_step
+                metrics["env_step"] = total_step * flags.ttyrec_batch_size * flags.ttyrec_unroll_length
+                wandb.log(metrics, step=total_step)
 
             # save model parameters
             if epoch % save_interval == 0:
@@ -678,9 +697,7 @@ class LearnableBase:
         self._active_logger.close()
         self._active_logger = None
 
-    def create_impl(
-        self, observation_shape: Sequence[int], action_size: int
-    ) -> None:
+    def create_impl(self, observation_shape: Sequence[int], action_size: int) -> None:
         """Instantiate implementation objects with the dataset shapes.
 
         This method will be used internally when `fit` method is called.
@@ -694,9 +711,7 @@ class LearnableBase:
             LOG.warn("Parameters will be reinitialized.")
         self._create_impl(observation_shape, action_size)
 
-    def _create_impl(
-        self, observation_shape: Sequence[int], action_size: int
-    ) -> None:
+    def _create_impl(self, observation_shape: Sequence[int], action_size: int) -> None:
         raise NotImplementedError
 
     def build_with_dataset(self, dataset: MDPDataset) -> None:
@@ -793,20 +808,31 @@ class LearnableBase:
 
     def _evaluate(
         self,
-        episodes: List[Episode],
+        episodes: Optional[List[Episode]],
         scorers: Dict[str, Callable[[Any, List[Episode]], float]],
         logger: D3RLPyLogger,
+        flags=None,
     ) -> None:
-        for name, scorer in scorers.items():
-            # evaluation with test data
-            test_score = scorer(self, episodes)
+        if episodes is not None:
+            for name, scorer in scorers.items():
+                # evaluation with test data
+                test_score = scorer(self, episodes)
 
-            # logging metrics
-            logger.add_metric(name, test_score)
+                # logging metrics
+                logger.add_metric(name, test_score)
 
-            # store metric locally
-            if test_score is not None:
-                self._eval_results[name].append(test_score)
+                # store metric locally
+                if test_score is not None:
+                    self._eval_results[name].append(test_score)
+
+        if flags is not None:
+            try:
+                model = self._impl._policy
+            except:
+                model = self._impl._q_func._q_funcs[0]
+
+            model = model.eval()
+            evaluate_nle(flags, model, logger)
 
     def save_params(self, logger: D3RLPyLogger) -> None:
         """Saves configurations as params.json.
@@ -831,6 +857,11 @@ class LearnableBase:
         # save shapes
         params["observation_shape"] = self._impl.observation_shape
         params["action_size"] = self._impl.action_size
+
+        # The encoder factory could be a class that is not serializable
+        for k in list(params.keys()):
+            if "encoder_factory" in k:
+                del params[k]
 
         # serialize objects
         params = _serialize_params(params)
