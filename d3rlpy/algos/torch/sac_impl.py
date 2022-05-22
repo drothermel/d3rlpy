@@ -292,7 +292,7 @@ class DiscreteSACImpl(DiscreteQFunctionMixin, TorchImplBase):
         )
 
     @train_api
-    @torch_api()
+    #@torch_api()
     def update_critic(self, batch: TorchMiniBatch) -> np.ndarray:
         assert self._critic_optim is not None
 
@@ -338,7 +338,7 @@ class DiscreteSACImpl(DiscreteQFunctionMixin, TorchImplBase):
         )
 
     @train_api
-    @torch_api()
+    #@torch_api()
     def update_actor(self, batch: TorchMiniBatch) -> np.ndarray:
         assert self._q_func is not None
         assert self._actor_optim is not None
@@ -367,7 +367,7 @@ class DiscreteSACImpl(DiscreteQFunctionMixin, TorchImplBase):
         return (probs * (entropy - q_t)).sum(dim=1).mean()
 
     @train_api
-    @torch_api()
+    #@torch_api()
     def update_temp(self, batch: TorchMiniBatch) -> np.ndarray:
         assert self._temp_optim is not None
         assert self._policy is not None

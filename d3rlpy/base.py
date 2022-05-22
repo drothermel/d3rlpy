@@ -21,8 +21,7 @@ import numpy as np
 from tqdm.auto import tqdm
 
 import wandb
-from nle_offline_baselines.dataset_utils import TtyrecEnvPool
-from nle_offline_baselines.d3rlpy_adaptors import evaluate_nle
+from nle_offline_baselines.eval_utils import evaluate_nle
 
 from .argument_utility import (
     ActionScalerArg,
@@ -346,7 +345,7 @@ class LearnableBase:
 
     def fit(
         self,
-        dataset: Union[List[Episode], List[Transition], MDPDataset, TtyrecEnvPool],
+        dataset: Union[List[Episode], List[Transition], MDPDataset],
         n_epochs: Optional[int] = None,
         n_steps: Optional[int] = None,
         n_steps_per_epoch: int = 10000,
@@ -486,7 +485,8 @@ class LearnableBase:
 
         """
 
-        if isinstance(dataset, TtyrecEnvPool):
+        #if isinstance(dataset, TtyrecEnvPool):
+        if flags is not None:
             iterator = dataset
         else:
             transitions = []
@@ -582,7 +582,8 @@ class LearnableBase:
         # instantiate implementation
         if self._impl is None:
             LOG.debug("Building models...")
-            if isinstance(iterator, TtyrecEnvPool):
+            #if isinstance(iterator, TtyrecEnvPool):
+            if flags is not None:
                 action_size = 121
                 observation_shape = [2, 81, 81]  # Ignored
             else:
@@ -612,18 +613,23 @@ class LearnableBase:
             # dict to add incremental mean losses to epoch
             epoch_loss = defaultdict(list)
 
-            range_gen = tqdm(
-                range(n_steps_per_epoch),
-                disable=not show_progress,
-                desc=f"Epoch {int(epoch)}/{n_epochs}",
-            )
+            if flags is None or flags.with_tqdm:
+                range_gen = tqdm(
+                    range(n_steps_per_epoch),
+                    disable=not show_progress,
+                    desc=f"Epoch {int(epoch)}/{n_epochs}",
+                )
+            else:
+                range_gen = range(n_steps_per_epoch)
 
-            if not isinstance(iterator, TtyrecEnvPool):
+            #if not isinstance(iterator, TtyrecEnvPool):
+            if flags is None:
                 iterator.reset()
 
             for itr in range_gen:
 
-                if not isinstance(iterator, TtyrecEnvPool):
+                #if not isinstance(iterator, TtyrecEnvPool):
+                if flags is None:
                     # generate new transitions with dynamics models
                     new_transitions = self.generate_new_data(
                         transitions=iterator.transitions,
@@ -639,7 +645,8 @@ class LearnableBase:
                 with logger.measure_time("step"):
                     # pick transitions
                     with logger.measure_time("sample_batch"):
-                        if isinstance(iterator, TtyrecEnvPool):
+                        #if isinstance(iterator, TtyrecEnvPool):
+                        if flags is not None:
                             batch = iterator.result()
                         else:
                             batch = next(iterator)
@@ -658,12 +665,16 @@ class LearnableBase:
                         mean_loss = {
                             k: np.mean(v[-log_window:]) for k, v in epoch_loss.items()
                         }
-                        range_gen.set_postfix(mean_loss)
+                        if flags is None or flags.with_tqdm:
+                            range_gen.set_postfix(mean_loss)
+                        else:
+                            print(f"Step {total_step}: {mean_loss}")
                         if flags is not None and flags.wandb:
                             wandb.log(mean_loss, step=total_step)
 
                 total_step += 1
-                if isinstance(iterator, TtyrecEnvPool):
+                #if isinstance(iterator, TtyrecEnvPool):
+                if flags is not None:
                     iterator.step()
 
                 # call callback if given
