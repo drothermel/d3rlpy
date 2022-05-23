@@ -15,7 +15,7 @@ from ..gpu import Device
 from ..models.encoders import EncoderFactory
 from ..models.optimizers import AdamFactory, OptimizerFactory
 from .base import AlgoBase
-from .torch.iql_impl import IQLImpl
+from .torch.iql_impl import IQLImpl, DiscreteIQLImpl
 
 
 class IQL(AlgoBase):
@@ -200,3 +200,33 @@ class IQL(AlgoBase):
 
     def get_action_type(self) -> ActionSpace:
         return ActionSpace.CONTINUOUS
+
+class DiscreteIQL(AlgoBase):
+    def _create_impl(
+        self, observation_shape: Sequence[int], action_size: int
+    ) -> None:
+        self._impl = DiscreteIQLImpl(
+            observation_shape=observation_shape,
+            action_size=action_size,
+            actor_learning_rate=self._actor_learning_rate,
+            critic_learning_rate=self._critic_learning_rate,
+            actor_optim_factory=self._actor_optim_factory,
+            critic_optim_factory=self._critic_optim_factory,
+            actor_encoder_factory=self._actor_encoder_factory,
+            critic_encoder_factory=self._critic_encoder_factory,
+            value_encoder_factory=self._value_encoder_factory,
+            gamma=self._gamma,
+            tau=self._tau,
+            n_critics=self._n_critics,
+            expectile=self._expectile,
+            weight_temp=self._weight_temp,
+            max_weight=self._max_weight,
+            use_gpu=self._use_gpu,
+            scaler=self._scaler,
+            action_scaler=self._action_scaler,
+            reward_scaler=self._reward_scaler,
+        )
+        self._impl.build()
+
+    def get_action_type(self) -> ActionSpace:
+        return ActionSpace.DISCRETE
