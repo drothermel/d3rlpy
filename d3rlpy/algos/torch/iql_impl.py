@@ -13,7 +13,7 @@ from ...models.builders import (
 )
 from ...models.encoders import EncoderFactory
 from ...models.optimizers import OptimizerFactory
-from ...models.q_functions import MeanQFunctionFactory
+from ...models.q_functions import MeanQFunctionFactory, QFunctionFactory
 from ...models.torch import NonSquashedNormalPolicy, ValueFunction
 from ...preprocessing import ActionScaler, RewardScaler, Scaler
 from ...torch_utility import TorchMiniBatch, torch_api, train_api, soft_sync
@@ -190,6 +190,7 @@ class DiscreteIQLImpl(DiscreteQFunctionMixin, TorchImplBase):
         actor_encoder_factory: EncoderFactory,
         critic_encoder_factory: EncoderFactory,
         value_encoder_factory: EncoderFactory,
+        q_func_factory: QFunctionFactory,
         gamma: float,
         tau: float,
         n_critics: int,
@@ -216,7 +217,7 @@ class DiscreteIQLImpl(DiscreteQFunctionMixin, TorchImplBase):
         self._critic_optim_factory = critic_optim_factory
         self._actor_encoder_factory = actor_encoder_factory
         self._critic_encoder_factory = critic_encoder_factory
-        self._q_func_factory = MeanQFunctionFactory()
+        self._q_func_factory = q_func_factory
         self._gamma = gamma
         self._tau = tau
         self._n_critics = n_critics
@@ -310,15 +311,11 @@ class DiscreteIQLImpl(DiscreteQFunctionMixin, TorchImplBase):
     def compute_actor_loss(self, batch: TorchMiniBatch) -> torch.Tensor:
         assert self._policy
 
-        # compute log probability
-        dist = self._policy.dist(batch.observations)
-        log_probs = dist.log_prob(batch.actions)
-        print("actions", batch.actions.size())
-        print("log porbs", log_probs.size())
-        print("weight", weight.size())
-        raise Exception("STOP")
+        log_probs = self._policy.log_probs(batch.observations)
 
         # compute weight
+        # this is a [B, #A] weight which is basically the per action advantage
+        # then, I'd expect we want to multiply it by the per-action probability
         with torch.no_grad():
             weight = self._compute_weight(batch)
 
@@ -327,7 +324,7 @@ class DiscreteIQLImpl(DiscreteQFunctionMixin, TorchImplBase):
     def _compute_weight(self, batch: TorchMiniBatch) -> torch.Tensor:
         assert self._targ_q_func
         assert self._value_func
-        q_t = self._targ_q_func(batch.observations, batch.actions, "min")
+        q_t = self._targ_q_func(batch.observations, reduction="min")
         v_t = self._value_func(batch.observations)
         adv = q_t - v_t
         return (self._weight_temp * adv).exp().clamp(max=self._max_weight)
@@ -335,14 +332,14 @@ class DiscreteIQLImpl(DiscreteQFunctionMixin, TorchImplBase):
     def compute_value_loss(self, batch: TorchMiniBatch) -> torch.Tensor:
         assert self._targ_q_func
         assert self._value_func
-        q_t = self._targ_q_func(batch.observations, batch.actions, "min")
+        q_t = self._targ_q_func(batch.observations, reduction="min")
         v_t = self._value_func(batch.observations)
         diff = q_t.detach() - v_t
         weight = (self._expectile - (diff < 0.0).float()).abs().detach()
         return (weight * (diff**2)).mean()
 
     @train_api
-    #@torch_api()
+    # @torch_api()
     def update_actor(self, batch: TorchMiniBatch) -> np.ndarray:
         assert self._q_func is not None
         assert self._actor_optim is not None
@@ -360,7 +357,7 @@ class DiscreteIQLImpl(DiscreteQFunctionMixin, TorchImplBase):
         return loss.cpu().detach().numpy()
 
     @train_api
-    #@torch_api()
+    # @torch_api()
     def update_critic(self, batch: TorchMiniBatch) -> np.ndarray:
         assert self._critic_optim is not None
 
