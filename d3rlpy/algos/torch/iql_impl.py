@@ -2,6 +2,7 @@ from typing import Optional, Sequence
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 import copy
 
 from ...gpu import Device
@@ -311,7 +312,9 @@ class DiscreteIQLImpl(DiscreteQFunctionMixin, TorchImplBase):
     def compute_actor_loss(self, batch: TorchMiniBatch) -> torch.Tensor:
         assert self._policy
 
-        log_probs = self._policy.log_probs(batch.observations)
+        dist = self._policy.dist(batch.observations)
+        actions_reshape = batch.actions.view([-1])
+        log_probs = dist.log_prob(actions_reshape).unsqueeze(1)
 
         # compute weight
         # this is a [B, #A] weight which is basically the per action advantage
@@ -325,8 +328,11 @@ class DiscreteIQLImpl(DiscreteQFunctionMixin, TorchImplBase):
         assert self._targ_q_func
         assert self._value_func
         q_t = self._targ_q_func(batch.observations, reduction="min")
+        one_hot = F.one_hot(batch.actions.view(-1), num_classes=q_t.size(1))
+        q_value = (q_t * one_hot.float()).sum(dim=1, keepdim=True)
+
         v_t = self._value_func(batch.observations)
-        adv = q_t - v_t
+        adv = q_value - v_t
         return (self._weight_temp * adv).exp().clamp(max=self._max_weight)
 
     def compute_value_loss(self, batch: TorchMiniBatch) -> torch.Tensor:
