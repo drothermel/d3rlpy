@@ -10,7 +10,7 @@ from .cql import CQL, DiscreteCQL
 from .crr import CRR
 from .ddpg import DDPG
 from .dqn import DQN, DoubleDQN
-from .iql import IQL
+from .iql import IQL, DiscreteIQL
 from .mopo import MOPO
 from .nfq import NFQ
 from .plas import PLAS, PLASWithPerturbation
@@ -35,6 +35,7 @@ __all__ = [
     "DQN",
     "DoubleDQN",
     "IQL",
+    "DiscreteIQL",
     "MOPO",
     "NFQ",
     "PLAS",
@@ -59,6 +60,7 @@ DISCRETE_ALGORITHMS: Dict[str, Type[AlgoBase]] = {
     "nfq": NFQ,
     "sac": DiscreteSAC,
     "random": DiscreteRandomPolicy,
+    "iql": DiscreteIQL,
 }
 
 CONTINUOUS_ALGORITHMS: Dict[str, Type[AlgoBase]] = {
