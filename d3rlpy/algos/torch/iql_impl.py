@@ -316,9 +316,6 @@ class DiscreteIQLImpl(DiscreteQFunctionMixin, TorchImplBase):
         actions_reshape = batch.actions.view([-1])
         log_probs = dist.log_prob(actions_reshape).unsqueeze(1)
 
-        # compute weight
-        # this is a [B, #A] weight which is basically the per action advantage
-        # then, I'd expect we want to multiply it by the per-action probability
         with torch.no_grad():
             weight = self._compute_weight(batch)
 
