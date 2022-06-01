@@ -49,6 +49,8 @@ class DiscreteQFunction(QFunction):
         x: Union[torch.Tensor, Dict[str, torch.Tensor]],
         recurrent_state: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
+        if recurrent_state is not None:
+            return self.forward(x, recurrent_state=recurrent_state)
         return self.forward(x)
 
     @property

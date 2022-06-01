@@ -43,7 +43,7 @@ class DiscreteMeanQFunction(DiscreteQFunction, nn.Module):  # type: ignore
     ) -> torch.Tensor:
         one_hot = F.one_hot(actions.view(-1), num_classes=self.action_size)
         if recurrent_state is not None:
-            q_out, _ = self.forward(observations, recurrent_state)
+            q_out, new_recurrent_state = self.forward(observations, recurrent_state)
         else:
             q_out = self.forward(observations)
         value = (q_out * one_hot.float()).sum(dim=1, keepdim=True)
@@ -54,7 +54,7 @@ class DiscreteMeanQFunction(DiscreteQFunction, nn.Module):  # type: ignore
 
         y = rewards + gamma * target * (1 - terminals)
         loss = compute_huber_loss(value, y)
-        return compute_reduce(loss, reduction)
+        return compute_reduce(loss, reduction), new_recurrent_state
 
     def compute_target(
         self,

@@ -281,22 +281,46 @@ class DiscreteCQLImpl(DoubleDQNImpl):
         batch: TorchMiniBatch,
         q_tpn: torch.Tensor,
     ) -> torch.Tensor:
-        loss = super().compute_loss(batch, q_tpn)
-        conservative_loss = self._compute_conservative_loss(
-            batch.observations, batch.actions.long()
-        )
+        if "idx" in batch.observations:
+            idx = batch.observations["idx"].item()
+            init_recurrent_states = self._recurrent_states[idx]
+            loss = super().compute_loss(batch, q_tpn)
+            conservative_loss = self._recurrent_compute_conservative_loss(
+                batch.observations, batch.actions.long(), init_recurrent_states,
+            )
+        else:
+            loss = super().compute_loss(batch, q_tpn)
+            conservative_loss = self._compute_conservative_loss(
+                batch.observations, batch.actions.long()
+            )
         return loss + self._alpha * conservative_loss
+
+    def _recurrent_compute_conservative_loss(
+        self, obs_t: torch.Tensor, act_t: torch.Tensor, recurrent_states,
+    ):
+        # compute logsumexp
+        idx = obs_t["idx"]
+        policy_values, _ = self._q_func(obs_t, recurrent_states=recurrent_states)
+        logsumexp = torch.logsumexp(policy_values, dim=1, keepdim=True)
+
+        # estimate action-values under data distribution
+        one_hot = F.one_hot(act_t.view(-1), num_classes=self.action_size)
+        data_values = (policy_values * one_hot).sum(dim=1, keepdim=True)
+        return (logsumexp - data_values).mean()
 
     def _compute_conservative_loss(
         self, obs_t: torch.Tensor, act_t: torch.Tensor
     ) -> torch.Tensor:
         assert self._q_func is not None
+        if "idx" in obs_t:
+            raise Exception("This shouldn't happen")
         # compute logsumexp
         policy_values = self._q_func(obs_t)
         logsumexp = torch.logsumexp(policy_values, dim=1, keepdim=True)
 
         # estimate action-values under data distribution
         one_hot = F.one_hot(act_t.view(-1), num_classes=self.action_size)
-        data_values = (self._q_func(obs_t) * one_hot).sum(dim=1, keepdim=True)
+        data_values = (policy_values * one_hot).sum(dim=1, keepdim=True)
 
         return (logsumexp - data_values).mean()
+

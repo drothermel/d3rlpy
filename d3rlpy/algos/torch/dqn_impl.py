@@ -60,6 +60,9 @@ class DQNImpl(DiscreteQFunctionMixin, TorchImplBase):
         self._n_critics = n_critics
         self._use_gpu = use_gpu
         self._grad_clip = grad_clip
+        self._recurrent_states = {}
+        self._next_recurrent_states = {} # Only used for DoubleDQN
+        self._next_target_recurrent_states = {}
 
         # initialized in build
         self._q_func = None
@@ -100,7 +103,6 @@ class DQNImpl(DiscreteQFunctionMixin, TorchImplBase):
     #@torch_api(scaler_targets=["obs_t", "obs_tpn"])
     def update(self, batch: TorchMiniBatch) -> np.ndarray:
         assert self._optim is not None
-
         self._optim.zero_grad()
 
         q_tpn = self.compute_target(batch)
@@ -115,12 +117,38 @@ class DQNImpl(DiscreteQFunctionMixin, TorchImplBase):
 
         return loss.cpu().detach().numpy(), unclipped_grad_norm.cpu().numpy()
 
+    def _compute_recurrent_loss(
+        self,
+        batch: TorchMiniBatch,
+        q_tpn: torch.Tensor,
+    ) -> torch.Tensor:
+        assert self._q_func is not None
+        idx = batch.observations["idx"].item()
+        BS = batch.rewards.size(1)
+        if idx not in self._recurrent_states:
+            self._recurrent_states[idx] = self._q_func.get_initial_states(
+                batch_size=BS,
+                device=batch.rewards.device,
+            )
+        q_error, self._recurrent_states[idx] = self._q_func.compute_error(
+            observations=batch.observations,
+            actions=batch.actions.long(),
+            rewards=batch.rewards,
+            target=q_tpn,
+            terminals=batch.terminals,
+            gamma=self._gamma**batch.n_steps,
+            recurrent_states=self._recurrent_states[idx],
+        )
+        return q_error
+
     def compute_loss(
         self,
         batch: TorchMiniBatch,
         q_tpn: torch.Tensor,
     ) -> torch.Tensor:
         assert self._q_func is not None
+        if "idx" in batch.observations:
+            return self._compute_recurrent_loss(batch, q_tpn)
         return self._q_func.compute_error(
             observations=batch.observations,
             actions=batch.actions.long(),
@@ -130,8 +158,40 @@ class DQNImpl(DiscreteQFunctionMixin, TorchImplBase):
             gamma=self._gamma**batch.n_steps,
         )
 
+    def _compute_recurrent_target(self, batch: TorchMiniBatch) -> torch.Tensor:
+        with torch.no_grad():
+            idx = batch.observations["idx"].item()
+            BS = batch.rewards.size(1)
+            if idx not in self._next_target_recurrent_states:
+                first_target_recurrent_states = self._targ_q_func.get_initial_states(
+                    batch_size=BS,
+                    device=batch.rewards.device,
+                )
+                _, self._next_target_recurrent_states[idx]  = self._targ_q_func(
+                    batch.observations,
+                    reduction="mean",
+                    recurrent_state=first_target_recurrent_states,
+                )
+
+            next_actions, next_target_recurrent_states = self._targ_q_func(
+                batch.next_observations,
+                recurrent_states=self._next_target_recurrent_states[idx],
+            )
+            max_action = next_actions.argmax(dim=1)
+            q_out = self._targ_q_func.compute_target(
+                batch.next_observations,
+                max_action,
+                reduction="min",
+                recurrent_states=self._next_target_recurrent_states[idx],
+            )
+            self._next_target_recurrent_states[idx] = next_target_recurrent_states
+            return q_out
+
     def compute_target(self, batch: TorchMiniBatch) -> torch.Tensor:
         assert self._targ_q_func is not None
+        if "idx" in batch.observations:
+            return self._compute_recurrent_target(batch)
+
         with torch.no_grad():
             next_actions = self._targ_q_func(batch.next_observations)
             max_action = next_actions.argmax(dim=1)
@@ -145,6 +205,16 @@ class DQNImpl(DiscreteQFunctionMixin, TorchImplBase):
         assert self._q_func is not None
         return self._q_func(x).argmax(dim=1)
 
+    def _recurrent_predict_best_action(
+        self,
+        x: torch.Tensor,
+        recurrent_states: Sequence[torch.Tensor],
+    ) -> torch.Tensor:
+        assert self._q_func is not None
+        q_out, next_recurrent_states = self._q_func(x, recurrent_states=recurrent_states)
+        action = q_out.argmax(dim=1)
+        return action, next_recurrent_states
+
     def _sample_action(self, x: torch.Tensor) -> torch.Tensor:
         return self._predict_best_action(x)
 
@@ -152,6 +222,9 @@ class DQNImpl(DiscreteQFunctionMixin, TorchImplBase):
         assert self._q_func is not None
         assert self._targ_q_func is not None
         hard_sync(self._targ_q_func, self._q_func)
+        self._next_target_recurrent_states = {
+            k: v for k, v in self._next_recurrent_states.items()
+        }
 
     @property
     def q_function(self) -> EnsembleQFunction:
@@ -165,8 +238,77 @@ class DQNImpl(DiscreteQFunctionMixin, TorchImplBase):
 
 
 class DoubleDQNImpl(DQNImpl):
+    def _compute_recurrent_loss(
+        self,
+        batch: TorchMiniBatch,
+        q_tpn: torch.Tensor,
+    ) -> torch.Tensor:
+        assert self._q_func is not None
+        idx = batch.observations["idx"].item()
+        q_error, self._recurrent_states[idx] = self._q_func.compute_error(
+            observations=batch.observations,
+            actions=batch.actions.long(),
+            rewards=batch.rewards,
+            target=q_tpn,
+            terminals=batch.terminals,
+            gamma=self._gamma**batch.n_steps,
+            recurrent_states=self._recurrent_states[idx],
+        )
+        return q_error
+
+    def _compute_recurrent_target(self, batch: TorchMiniBatch) -> torch.Tensor:
+        with torch.no_grad():
+            idx = batch.observations["idx"].item()
+            BS = batch.rewards.size(1)
+            # The target model forward only ever uses the next_observation
+            if idx not in self._next_target_recurrent_states:
+                first_target_recurrent_states = self._targ_q_func.get_initial_states(
+                    batch_size=BS,
+                    device=batch.rewards.device,
+                )
+                _, next_target_recurrent_states  = self._targ_q_func(
+                    batch.observations,
+                    reduction="mean",
+                    recurrent_states=first_target_recurrent_states,
+                )
+                self._next_target_recurrent_states[idx] = next_target_recurrent_states
+
+            if idx not in self._recurrent_states:
+                self._recurrent_states[idx] = self._q_func.get_initial_states(
+                    batch_size=BS,
+                    device=batch.rewards.device,
+                )
+                _, self._next_recurrent_states[idx] = self._q_func(
+                    batch.observations,
+                    recurrent_states=self._recurrent_states[idx],
+                )
+
+            # Predict best action uses the learning model
+            action, next_next_recurrent_states = self._recurrent_predict_best_action(
+                batch.next_observations,
+                recurrent_states=self._next_recurrent_states[idx],
+            )
+            self._recurrent_states[idx] = self._next_recurrent_states[idx]
+            self._next_recurrent_states[idx] = next_next_recurrent_states
+
+            # Compute target uses the target model
+            q_out = self._targ_q_func.compute_target(
+                batch.next_observations,
+                action,
+                reduction="min",
+                recurrent_states=self._next_target_recurrent_states[idx],
+            )
+
+            _, self._next_target_recurrent_states[idx] = self._targ_q_func(
+                batch.next_observations,
+                recurrent_states=self._next_target_recurrent_states[idx],
+            )
+            return q_out
+
     def compute_target(self, batch: TorchMiniBatch) -> torch.Tensor:
         assert self._targ_q_func is not None
+        if "idx" in batch.observations:
+            return self._compute_recurrent_target(batch)
         with torch.no_grad():
             action = self._predict_best_action(batch.next_observations)
             return self._targ_q_func.compute_target(

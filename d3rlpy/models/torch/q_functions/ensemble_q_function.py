@@ -1,4 +1,4 @@
-from typing import List, Optional, Union, cast, Dict, Tuple
+from typing import List, Optional, Union, cast, Dict, Tuple, Sequence
 
 import torch
 from torch import nn
@@ -78,6 +78,14 @@ class EnsembleQFunction(nn.Module):  # type: ignore
         self._action_size = q_funcs[0].action_size
         self._q_funcs = nn.ModuleList(q_funcs)
 
+    def get_initial_states(self, batch_size, device):
+        initial_states = []
+        for q in self._q_funcs:
+            initial_state = q._encoder.initial_state(batch_size=batch_size)
+            initial_state = (initial_state[0].to(device), initial_state[1].to(device))
+            initial_states.append(initial_state)
+        return initial_states
+
     def compute_error(
         self,
         observations: Union[torch.Tensor, Dict[str, torch.Tensor]],
@@ -86,7 +94,7 @@ class EnsembleQFunction(nn.Module):  # type: ignore
         target: torch.Tensor,
         terminals: torch.Tensor,
         gamma: float = 0.99,
-        recurrent_state: Optional[torch.Tensor] = None,
+        recurrent_states: Optional[Sequence[torch.Tensor]] = None,
     ) -> torch.Tensor:
         assert target.ndim == 2
         device = (
@@ -96,6 +104,22 @@ class EnsembleQFunction(nn.Module):  # type: ignore
         )
 
         td_sum = torch.tensor(0.0, dtype=torch.float32, device=device)
+        if recurrent_states is not None:
+            new_recurrent_states = {}
+            for i, q_func in enumerate(self._q_funcs):
+                loss, new_recurrent_states[i] = q_func.compute_error(
+                    observations=observations,
+                    actions=actions,
+                    rewards=rewards,
+                    target=target,
+                    terminals=terminals,
+                    gamma=gamma,
+                    reduction="none",
+                    recurrent_state=recurrent_states[i],
+                )
+                td_sum += loss.mean()
+            return td_sum, new_recurrent_states
+
         for q_func in self._q_funcs:
             loss = q_func.compute_error(
                 observations=observations,
@@ -116,15 +140,18 @@ class EnsembleQFunction(nn.Module):  # type: ignore
         action: Optional[torch.Tensor] = None,
         reduction: str = "min",
         lam: float = 0.75,
-        recurrent_state: Optional[torch.Tensor] = None,
+        recurrent_states: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         Bin = (
             x.size(0) if isinstance(x, torch.Tensor) else next(iter(x.values())).size(0)
         )
 
         values_list: List[torch.Tensor] = []
-        for q_func in self._q_funcs:
-            target = q_func.compute_target(x, action, recurrent_state=recurrent_state)
+        for i, q_func in enumerate(self._q_funcs):
+            if recurrent_states is not None:
+                target = q_func.compute_target(x, action, recurrent_states[i])
+            else:
+                target = q_func.compute_target(x, action)
             Bout = target.size(0)
             assert Bout % Bin == 0
             values_list.append(target.reshape(1, Bout, -1))
@@ -157,36 +184,36 @@ class EnsembleDiscreteQFunction(EnsembleQFunction):
         self,
         x: Union[torch.Tensor, Dict[str, torch.Tensor]],
         reduction: str = "mean",
-        recurrent_state: Optional[torch.Tensor] = None,
+        recurrent_states: Optional[Sequence[torch.Tensor]] = None,
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, List[torch.Tensor]]]:
         Bin = (
             x.size(0) if isinstance(x, torch.Tensor) else next(iter(x.values())).size(0)
         )
         values = []
-        recurrent_states = []
-        for q_func in self._q_funcs:
-            if recurrent_state is None:
-                q_out = q_func(x)
+        next_recurrent_states = {}
+        for i, q_func in enumerate(self._q_funcs):
+            if recurrent_states is not None:
+                q_out, next_recurrent_states[i] = q_func(
+                    x, recurrent_state=recurrent_states[i],
+                )
             else:
-                q_out, recurrent_state = q_func(x, recurrent_state=recurrent_state)
+                q_out = q_func(x)
             Bout = q_out.size(0)
             assert Bout % Bin == 0
             q_out = q_out.view(1, Bout, self._action_size)
             values.append(q_out)
-            recurrent_states.append(recurrent_state)
         reduced_q_out = _reduce_ensemble(torch.cat(values, dim=0), reduction)
-        if recurrent_state is None:
-            return reduced_q_out
-        else:
-            return reduced_q_out, recurrent_states
+        if recurrent_states is not None:
+            return reduced_q_out, next_recurrent_states
+        return reduced_q_out
 
     def __call__(
         self,
         x: Union[torch.Tensor, Dict[str, torch.Tensor]],
         reduction: str = "mean",
-        recurrent_state: Optional[torch.Tensor] = None,
+        recurrent_states: Optional[Sequence[torch.Tensor]] = None,
     ) -> torch.Tensor:
-        return super().__call__(x, reduction=reduction, recurrent_state=recurrent_state)
+        return super().__call__(x, reduction=reduction, recurrent_states=recurrent_states)
 
     def compute_target(
         self,
@@ -194,9 +221,9 @@ class EnsembleDiscreteQFunction(EnsembleQFunction):
         action: Optional[torch.Tensor] = None,
         reduction: str = "min",
         lam: float = 0.75,
-        recurrent_state: Optional[torch.Tensor] = None,
+        recurrent_states: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        return self._compute_target(x, action, reduction, lam, recurrent_state)
+        return self._compute_target(x, action, reduction, lam, recurrent_states)
 
 
 class EnsembleContinuousQFunction(EnsembleQFunction):

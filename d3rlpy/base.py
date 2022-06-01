@@ -608,6 +608,7 @@ class LearnableBase:
 
         # training loop
         total_step = 0
+        idx = None
         for epoch in range(1, n_epochs + 1):
 
             # dict to add incremental mean losses to epoch
