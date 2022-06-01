@@ -201,6 +201,8 @@ class SAC(AlgoBase):
         if self._temp_learning_rate > 0:
             temp_loss, temp = self._impl.update_temp(batch)
             metrics.update({"temp_loss": temp_loss, "temp": temp})
+        else:
+            raise Exception("This path will screw with recurrent impl")
 
         critic_loss = self._impl.update_critic(batch)
         metrics.update({"critic_loss": critic_loss})
@@ -379,6 +381,8 @@ class DiscreteSAC(AlgoBase):
         if self._temp_learning_rate > 0:
             temp_loss, temp = self._impl.update_temp(batch)
             metrics.update({"temp_loss": temp_loss, "temp": temp})
+        else:
+            raise Exception("This path will screw with recurrent impl")
 
         critic_loss = self._impl.update_critic(batch)
         metrics.update({"critic_loss": critic_loss})

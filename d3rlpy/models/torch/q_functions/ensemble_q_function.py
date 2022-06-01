@@ -141,15 +141,19 @@ class EnsembleQFunction(nn.Module):  # type: ignore
         reduction: str = "min",
         lam: float = 0.75,
         recurrent_states: Optional[torch.Tensor] = None,
+        return_recurrent: bool = False,
     ) -> torch.Tensor:
         Bin = (
             x.size(0) if isinstance(x, torch.Tensor) else next(iter(x.values())).size(0)
         )
 
         values_list: List[torch.Tensor] = []
+        new_recurrent_states = {}
         for i, q_func in enumerate(self._q_funcs):
             if recurrent_states is not None:
-                target = q_func.compute_target(x, action, recurrent_states[i])
+                target, new_recurrent_states[i] = q_func.compute_target(
+                    x, action, recurrent_states[i],
+                )
             else:
                 target = q_func.compute_target(x, action)
             Bout = target.size(0)
@@ -161,17 +165,25 @@ class EnsembleQFunction(nn.Module):  # type: ignore
         if action is None:
             # mean Q function
             if values.shape[2] == self._action_size:
+                if return_recurrent:
+                    return _reduce_ensemble(values, reduction), new_recurrent_states
                 return _reduce_ensemble(values, reduction)
             # distributional Q function
             Bout = values.shape[1]
             n_q_funcs = values.shape[0]
             values = values.view(n_q_funcs, Bout, self._action_size, -1)
             print("BEWARE: THIS MIGHT NOT WORK, this codepath hasn't been tested")
+            if return_recurrent:
+                return _reduce_quantile_ensemble(values, reduction), new_recurrent_states
             return _reduce_quantile_ensemble(values, reduction)
 
         if values.shape[2] == 1:
+            if return_recurrent:
+                return _reduce_ensemble(values, reduction, lam=lam), new_recurrent_states
             return _reduce_ensemble(values, reduction, lam=lam)
 
+        if return_recurrent:
+            return _reduce_quantile_ensemble(values, reduction, lam=lam), new_recurrent_states
         return _reduce_quantile_ensemble(values, reduction, lam=lam)
 
     @property
@@ -222,8 +234,16 @@ class EnsembleDiscreteQFunction(EnsembleQFunction):
         reduction: str = "min",
         lam: float = 0.75,
         recurrent_states: Optional[torch.Tensor] = None,
+        return_recurrent: bool = False,
     ) -> torch.Tensor:
-        return self._compute_target(x, action, reduction, lam, recurrent_states)
+        return self._compute_target(
+            x,
+            action=action,
+            reduction=reduction,
+            lam=lam,
+            recurrent_states=recurrent_states,
+            return_recurrent=return_recurrent,
+        )
 
 
 class EnsembleContinuousQFunction(EnsembleQFunction):

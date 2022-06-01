@@ -290,6 +290,11 @@ class CategoricalPolicy(Policy):
         self._encoder = encoder
         self._fc = nn.Linear(encoder.get_feature_size(), action_size)
 
+    def get_initial_state(self, batch_size, device):
+        initial_state = self._encoder.initial_state(batch_size=batch_size)
+        initial_state = (initial_state[0].to(device), initial_state[1].to(device))
+        return initial_state
+
     def dist(
         self,
         x: Union[torch.Tensor, Dict[str, torch.Tensor]],

@@ -225,6 +225,11 @@ class DiscreteSACImpl(DiscreteQFunctionMixin, TorchImplBase):
         self._n_critics = n_critics
         self._initial_temperature = initial_temperature
         self._use_gpu = use_gpu
+        self._policy_recurrent_state = {}
+        self._next_policy_recurrent_state = {}
+        self._recurrent_states = {}
+        self._next_recurrent_states = {} # only for target updates
+        self._next_target_recurrent_states = {}
 
         # initialized in build
         self._q_func = None
@@ -306,10 +311,46 @@ class DiscreteSACImpl(DiscreteQFunctionMixin, TorchImplBase):
 
         return loss.cpu().detach().numpy()
 
+
+    def _recurrent_compute_target(self, batch: TorchMiniBatch) -> torch.Tensor:
+        with torch.no_grad():
+            idx = batch.observations["idx"].item()
+            BS = batch.rewards.size(1)
+            log_probs, self._next_policy_recurrent_state[idx] = self._policy.log_probs(
+                batch.next_observations,
+                recurrent_state=self._next_policy_recurrent_state[idx],
+            )
+            probs = log_probs.exp()
+            entropy = self._log_temp().exp() * log_probs
+
+            if idx not in self._next_target_recurrent_states:
+                first_target_state = self._targ_q_func.get_initial_states(
+                    batch_size=BS,
+                    device=batch.rewards.device,
+                )
+                _, self._next_target_recurrent_states[idx] = self._targ_q_func(
+                    batch.observations,
+                    recurrent_states=first_target_state,
+                )
+
+            target, self._next_target_recurrent_states[idx] = self._targ_q_func.compute_target(
+                batch.next_observations,
+                recurrent_states=self._next_target_recurrent_states[idx],
+                return_recurrent=True,
+            )
+            keepdims = True
+            if target.dim() == 3:
+                entropy = entropy.unsqueeze(-1)
+                probs = probs.unsqueeze(-1)
+                keepdims = False
+            return (probs * (target - entropy)).sum(dim=1, keepdim=keepdims)
+
     def compute_target(self, batch: TorchMiniBatch) -> torch.Tensor:
         assert self._policy is not None
         assert self._log_temp is not None
         assert self._targ_q_func is not None
+        if "idx" in batch.observations:
+            return self._recurrent_compute_target(batch)
         with torch.no_grad():
             log_probs = self._policy.log_probs(batch.next_observations)
             probs = log_probs.exp()
@@ -322,12 +363,37 @@ class DiscreteSACImpl(DiscreteQFunctionMixin, TorchImplBase):
                 keepdims = False
             return (probs * (target - entropy)).sum(dim=1, keepdim=keepdims)
 
+    def _recurrent_compute_critic_loss(
+        self,
+        batch: TorchMiniBatch,
+        q_tpn: torch.Tensor,
+    ) -> torch.Tensor:
+        idx = batch.observations["idx"].item()
+        if idx not in self._recurrent_states:
+            BS = batch.rewards.size(1)
+            self._recurrent_states[idx] = self._q_func.get_initial_states(
+                batch_size=BS,
+                device=batch.rewards.device,
+            )
+        q_out, _ = self._q_func.compute_error(
+            observations=batch.observations,
+            actions=batch.actions.long(),
+            rewards=batch.rewards,
+            target=q_tpn,
+            terminals=batch.terminals,
+            gamma=self._gamma**batch.n_steps,
+            recurrent_states=self._recurrent_states[idx],
+        )
+        return q_out
+
     def compute_critic_loss(
         self,
         batch: TorchMiniBatch,
         q_tpn: torch.Tensor,
     ) -> torch.Tensor:
         assert self._q_func is not None
+        if "idx" in batch.observations:
+            return self._recurrent_compute_critic_loss(batch, q_tpn)
         return self._q_func.compute_error(
             observations=batch.observations,
             actions=batch.actions.long(),
@@ -355,10 +421,35 @@ class DiscreteSACImpl(DiscreteQFunctionMixin, TorchImplBase):
 
         return loss.cpu().detach().numpy()
 
+    def _recurrent_compute_actor_loss(self, batch: TorchMiniBatch) -> torch.Tensor:
+        idx = batch.observations["idx"].item()
+        with torch.no_grad():
+            q_t, self._recurrent_states[idx] = self._q_func(
+                batch.observations, reduction="min",
+                recurrent_states=self._recurrent_states[idx],
+            )
+            _, self._next_recurrent_states[idx] = self._q_func(
+                batch.next_observations,
+                recurrent_states=self._recurrent_states[idx],
+            )
+        log_probs, policy_recurrent_state = self._policy.log_probs(
+            batch.observations,
+            recurrent_state=self._policy_recurrent_state[idx],
+        )
+        self._policy_recurrent_state[idx] = (
+            policy_recurrent_state[0].detach(),
+            policy_recurrent_state[1].detach(),
+        )
+        probs = log_probs.exp()
+        entropy = self._log_temp().exp() * log_probs
+        return (probs * (entropy - q_t)).sum(dim=1).mean()
+
     def compute_actor_loss(self, batch: TorchMiniBatch) -> torch.Tensor:
         assert self._q_func is not None
         assert self._policy is not None
         assert self._log_temp is not None
+        if "idx" in batch.observations:
+            return self._recurrent_compute_actor_loss(batch)
         with torch.no_grad():
             q_t = self._q_func(batch.observations, reduction="min")
         log_probs = self._policy.log_probs(batch.observations)
@@ -366,12 +457,54 @@ class DiscreteSACImpl(DiscreteQFunctionMixin, TorchImplBase):
         entropy = self._log_temp().exp() * log_probs
         return (probs * (entropy - q_t)).sum(dim=1).mean()
 
+    def _recurrent_update_temp(self, batch: TorchMiniBatch) -> np.ndarray:
+        assert self._temp_optim is not None
+        assert self._policy is not None
+        assert self._log_temp is not None
+
+        self._temp_optim.zero_grad()
+
+        idx = batch.observations["idx"].item()
+        BS = batch.rewards.size(1)
+        if idx not in self._policy_recurrent_state:
+            self._policy_recurrent_state[idx] = self._policy.get_initial_state(
+                batch_size=BS,
+                device=batch.rewards.device,
+            )
+            with torch.no_grad():
+                _, self._next_policy_recurrent_state[idx] = self._policy(
+                    batch.observations,
+                    recurrent_state=self._policy_recurrent_state[idx],
+                )
+
+        with torch.no_grad():
+            log_probs, _ = self._policy.log_probs(
+                batch.observations,
+                recurrent_state=self._policy_recurrent_state[idx],
+            )
+            probs = log_probs.exp()
+            expct_log_probs = (probs * log_probs).sum(dim=1, keepdim=True)
+            entropy_target = 0.98 * (-math.log(1 / self.action_size))
+            targ_temp = expct_log_probs + entropy_target
+
+        loss = -(self._log_temp().exp() * targ_temp).mean()
+
+        loss.backward()
+        self._temp_optim.step()
+
+        # current temperature value
+        cur_temp = self._log_temp().exp().cpu().detach().numpy()[0][0]
+
+        return loss.cpu().detach().numpy(), cur_temp
+
     @train_api
     #@torch_api()
     def update_temp(self, batch: TorchMiniBatch) -> np.ndarray:
         assert self._temp_optim is not None
         assert self._policy is not None
         assert self._log_temp is not None
+        if "idx" in batch.observations:
+            return self._recurrent_update_temp(batch)
 
         self._temp_optim.zero_grad()
 
@@ -404,6 +537,9 @@ class DiscreteSACImpl(DiscreteQFunctionMixin, TorchImplBase):
         assert self._q_func is not None
         assert self._targ_q_func is not None
         hard_sync(self._targ_q_func, self._q_func)
+        self._next_target_recurrent_states = {
+            k: v for k, v in self._next_recurrent_states.items()
+        }
 
     @property
     def policy(self) -> Policy:

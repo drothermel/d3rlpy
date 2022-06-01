@@ -64,12 +64,15 @@ class DiscreteMeanQFunction(DiscreteQFunction, nn.Module):  # type: ignore
     ) -> torch.Tensor:
         if recurrent_state is None:
             q_out = self.forward(x)
+            if action is None:
+                return q_out
+            return pick_value_by_action(q_out, action, keepdim=True)
         else:
-            q_out, _ = self.forward(x, recurrent_state)
+            q_out, recurrent_state = self.forward(x, recurrent_state)
+            if action is None:
+                return q_out, recurrent_state
+            return pick_value_by_action(q_out, action, keepdim=True), recurrent_state
 
-        if action is None:
-            return q_out
-        return pick_value_by_action(q_out, action, keepdim=True)
 
     def best_action(
         self,
