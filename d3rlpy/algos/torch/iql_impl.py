@@ -224,11 +224,16 @@ class DiscreteIQLImpl(DiscreteQFunctionMixin, TorchImplBase):
         self._n_critics = n_critics
         self._use_gpu = use_gpu
 
+        self._recurrent_states = {}
+        self._value_recurrent_state = {}
+        self._next_value_recurrent_state = {}
+        self._target_recurrent_states = {}
+        self._policy_recurrent_state = {}
+
         # initialized in build
         self._q_func = None
         self._policy = None
         self._targ_q_func = None
-        self._targ_policy = None
         self._actor_optim = None
         self._critic_optim = None
 
@@ -246,7 +251,6 @@ class DiscreteIQLImpl(DiscreteQFunctionMixin, TorchImplBase):
 
         # setup target networks
         self._targ_q_func = copy.deepcopy(self._q_func)
-        self._targ_policy = copy.deepcopy(self._policy)
 
         if self._use_gpu:
             self.to_gpu(self._use_gpu)
@@ -291,10 +295,37 @@ class DiscreteIQLImpl(DiscreteQFunctionMixin, TorchImplBase):
             q_func_params + v_func_params, lr=self._critic_learning_rate
         )
 
+    def _recurrent_compute_critic_loss(
+        self, batch: TorchMiniBatch, q_tpn: torch.Tensor
+    ) -> torch.Tensor:
+        idx = batch.observations["idx"].item()
+        if idx not in self._recurrent_states:
+            self._recurrent_states[idx] = self._q_func.get_initial_states(
+                batch_size=batch.rewards.size(1),
+                device=batch.rewards.device,
+            )
+
+        q_out, recurrent_states = self._q_func.compute_error(
+            observations=batch.observations,
+            actions=batch.actions,
+            rewards=batch.rewards,
+            target=q_tpn,
+            terminals=batch.terminals,
+            gamma=self._gamma**batch.n_steps,
+            recurrent_states=self._recurrent_states[idx],
+        )
+        self._recurrent_states[idx] = {
+            i: (rs[0].detach(), rs[1].detach()) for i, rs in recurrent_states.items()
+        }
+        return q_out
+
+
     def compute_critic_loss(
         self, batch: TorchMiniBatch, q_tpn: torch.Tensor
     ) -> torch.Tensor:
         assert self._q_func is not None
+        if "idx" in batch.observations:
+            return self._recurrent_compute_critic_loss(batch, q_tpn)
         return self._q_func.compute_error(
             observations=batch.observations,
             actions=batch.actions,
@@ -304,13 +335,59 @@ class DiscreteIQLImpl(DiscreteQFunctionMixin, TorchImplBase):
             gamma=self._gamma**batch.n_steps,
         )
 
+    def _recurrent_compute_target(self, batch: TorchMiniBatch) -> torch.Tensor:
+        idx = batch.observations["idx"].item()
+        if idx not in self._value_recurrent_state:
+            BS = batch.rewards.size(1)
+            self._value_recurrent_state[idx] = self._value_func.get_initial_state(
+                batch_size=BS,
+                device=batch.rewards.device,
+            )
+            _, self._next_value_recurrent_state[idx] = self._value_func.forward(
+                batch.observations,
+                recurrent_state=self._value_recurrent_state[idx],
+            )
+        with torch.no_grad():
+            v_out, self._next_value_recurrent_state[idx] = self._value_func.forward(
+                batch.next_observations,
+                recurrent_state=self._next_value_recurrent_state[idx],
+            )
+            return v_out
+
     def compute_target(self, batch: TorchMiniBatch) -> torch.Tensor:
         assert self._value_func
+        if "idx" in batch.observations:
+            return self._recurrent_compute_target(batch)
         with torch.no_grad():
-            return self._value_func(batch.next_observations)
+            return self._value_func.forward(batch.next_observations)
+
+    def _recurrent_compute_actor_loss(self, batch: TorchMiniBatch) -> torch.Tensor:
+        idx = batch.observations["idx"]
+        if idx not in self._policy_recurrent_state:
+            self._policy_recurrent_state[idx] = self._policy.get_initial_state(
+                batch_size=batch.rewards.size(1),
+                device=batch.rewards.device,
+            )
+        dist, policy_recurrent_state = self._policy.dist(
+            batch.observations,
+            recurrent_state=self._policy_recurrent_state[idx],
+        )
+        self._policy_recurrent_state[idx] = (
+            policy_recurrent_state[0].detach(),
+            policy_recurrent_state[1].detach(),
+        )
+        actions_reshape = batch.actions.view([-1])
+        log_probs = dist.log_prob(actions_reshape).unsqueeze(1)
+
+        with torch.no_grad():
+            weight = self._compute_weight(batch)
+
+        return -(weight * log_probs).mean()
 
     def compute_actor_loss(self, batch: TorchMiniBatch) -> torch.Tensor:
         assert self._policy
+        if "idx" in batch.observations:
+            return self._recurrent_compute_actor_loss(batch)
 
         dist = self._policy.dist(batch.observations)
         actions_reshape = batch.actions.view([-1])
@@ -321,22 +398,62 @@ class DiscreteIQLImpl(DiscreteQFunctionMixin, TorchImplBase):
 
         return -(weight * log_probs).mean()
 
+    def _recurrent_compute_weight(self, batch: TorchMiniBatch) -> torch.Tensor:
+        idx = batch.observations["idx"].item()
+
+        q_t, self._target_recurrent_states[idx] = self._targ_q_func(
+            batch.observations, reduction="min",
+            recurrent_states=self._target_recurrent_states[idx],
+        )
+        one_hot = F.one_hot(batch.actions.view(-1), num_classes=q_t.size(1))
+        q_value = (q_t * one_hot.float()).sum(dim=1, keepdim=True)
+
+        v_t, self._value_recurrent_state[idx] = self._value_func.forward(
+            batch.observations,
+            recurrent_state=self._value_recurrent_state[idx],
+        )
+        adv = q_value - v_t
+        return (self._weight_temp * adv).exp().clamp(max=self._max_weight)
+
     def _compute_weight(self, batch: TorchMiniBatch) -> torch.Tensor:
         assert self._targ_q_func
         assert self._value_func
+        if "idx" in batch.observations:
+            return self._recurrent_compute_weight(batch)
         q_t = self._targ_q_func(batch.observations, reduction="min")
         one_hot = F.one_hot(batch.actions.view(-1), num_classes=q_t.size(1))
         q_value = (q_t * one_hot.float()).sum(dim=1, keepdim=True)
 
-        v_t = self._value_func(batch.observations)
+        v_t = self._value_func.forward(batch.observations)
         adv = q_value - v_t
         return (self._weight_temp * adv).exp().clamp(max=self._max_weight)
+
+    def _recurrent_compute_value_loss(self, batch: TorchMiniBatch):
+        idx = batch.observations["idx"].item()
+        if idx not in self._target_recurrent_states:
+            self._target_recurrent_states[idx] = self._targ_q_func.get_initial_states(
+                batch_size=batch.rewards.size(1),
+                device=batch.rewards.device,
+            )
+        q_t, _ = self._targ_q_func(
+            batch.observations, reduction="min",
+            recurrent_states=self._target_recurrent_states[idx],
+        )
+        v_t, _ = self._value_func.forward(
+            batch.observations,
+            recurrent_state=self._value_recurrent_state[idx],
+        )
+        diff = q_t.detach() - v_t
+        weight = (self._expectile - (diff < 0.0).float()).abs().detach()
+        return (weight * (diff**2)).mean()
 
     def compute_value_loss(self, batch: TorchMiniBatch) -> torch.Tensor:
         assert self._targ_q_func
         assert self._value_func
+        if "idx" in batch.observations:
+            return self._recurrent_compute_value_loss(batch)
         q_t = self._targ_q_func(batch.observations, reduction="min")
-        v_t = self._value_func(batch.observations)
+        v_t = self._value_func.forward(batch.observations)
         diff = q_t.detach() - v_t
         weight = (self._expectile - (diff < 0.0).float()).abs().detach()
         return (weight * (diff**2)).mean()
@@ -385,7 +502,4 @@ class DiscreteIQLImpl(DiscreteQFunctionMixin, TorchImplBase):
         assert self._targ_q_func is not None
         soft_sync(self._targ_q_func, self._q_func, self._tau)
 
-    def update_actor_target(self) -> None:
-        assert self._policy is not None
-        assert self._targ_policy is not None
-        soft_sync(self._targ_policy, self._policy, self._tau)
+
